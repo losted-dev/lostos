@@ -206,7 +206,11 @@ func deployFiles(s, bin, ts, arch string, zigbee, legacy bool) (changed, supChan
 	}
 
 	if opts.ssh {
-		_ = shTo(out, s, "pidof dropbear >/dev/null || /data/dropbear/start.sh </dev/null >/dev/null 2>&1 &")
+		if shTo(out, s, "/data/dropbear/start.sh </dev/null >/dev/null 2>&1") != nil {
+			fmt.Fprintln(errw, "не удалось безопасно перезапустить SSH")
+			return
+		}
+		fmt.Fprintln(out, "SSH принимает только ключи из authorized_keys пользователя root; настройте свой публичный ключ через ADB до первого входа")
 	}
 	return changed, supChanged, true
 }
