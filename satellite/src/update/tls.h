@@ -15,7 +15,7 @@ struct TlsSock {
 enum class TlsIo { OK, WANT_READ, WANT_WRITE, CLOSED, ERROR };
 
 // Resolves, connects and does the handshake (blocking, the certificate and the host name are checked); the socket is non-blocking afterwards.
-bool tls_connect(const std::string &host, const std::string &port, TlsSock &s, std::string &err, const std::string &ca_file = "");
+bool tls_connect(const std::string &host, const std::string &port, TlsSock &s, std::string &err);
 // The same socket WITHOUT encryption, for a server in the owner's own home network (http://192.168.x.y): nothing is checked and anybody on that network can read it. The caller must refuse any address that is not private.
 bool plain_connect(const std::string &host, const std::string &port, TlsSock &s, std::string &err);
 TlsIo tls_read(TlsSock &s, char *buf, int cap, int &n);

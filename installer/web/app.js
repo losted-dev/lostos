@@ -109,7 +109,7 @@ const RENDER = {
       (S.srvType === "url" ? `<div style="margin:10px 4px 4px"><div class="row"><input class="field" id="surl" placeholder="https://адрес-сервера" value="${esc(S.srvUrl)}" style="flex:1"><button class="btn small acc" id="scheck">Проверить</button></div><div id="sres"></div>
         <div class="sect">Home Assistant дома (по желанию)</div><input class="field" id="sha" placeholder="IP:порт, например 192.168.1.5:8123" value="${esc(S.ha)}"><p class="msg" id="shamsg"></p><p class="hint">Колонка пробросит этот адрес вашей домашней сети серверу: так ассистент управляет умным домом, а Home Assistant не открывается в интернет.</p></div>` : "") +
       T("local", "pc", "Сервер на этом компьютере", "Для дома, без интернета и домена: установщик сам поставит маленький сервер (нужен Python 3.11+) и подключит к нему колонку.") +
-      (S.srvType === "local" ? `<div style="margin:10px 4px 4px"><p class="msg">Сервер будет жить в вашей папке пользователя и запускаться при входе в систему. Связь колонки с сервером защищена HTTPS. Установщик покажет файл сертификата, который нужно добавить в доверенные сертификаты браузера.</p>
+      (S.srvType === "local" ? `<div style="margin:10px 4px 4px"><p class="msg">Сервер будет жить в вашей папке пользователя и запускаться при входе в систему.</p>
         <div class="sect">Home Assistant дома (по желанию)</div><input class="field" id="sha" placeholder="IP:порт, например 192.168.1.5:8123" value="${esc(S.ha)}"><p class="msg" id="shamsg"></p></div>` : "") +
       T("speaker", "chip", "Сервер в колонке", "Лёгкий сервер прямо на Станции, компьютер не нужен. В разработке.", true);
     document.querySelectorAll("[data-type]").forEach((e) => e.onclick = () => { if (!e.classList.contains("off")) { S.srvType = e.dataset.type; S.srvInfo = null; paint(); } });
@@ -210,7 +210,7 @@ async function startInstall() {
     if (j.done) {
       S.installing = false; S.installOk = j.ok;
       const m = $("#imsg");
-      if (j.ok && S.srvType === "local" && j.result) { S.srvUrl = j.result.server || ""; S.srvInfo = { url: S.srvUrl, secure: true, plain: false }; S.setupLink = j.result.setup || ""; }
+      if (j.ok && S.srvType === "local" && j.result) { S.srvUrl = j.result.server || ""; S.srvInfo = { url: S.srvUrl, secure: true, plain: true }; S.setupLink = j.result.setup || ""; }
       if (j.ok) { S.link = j.result && j.result.id ? { id: j.result.id, state: j.result.state } : null; m.className = "msg ok"; m.textContent = "Установка завершена."; $("#next").disabled = false; }
       else { m.className = "msg bad"; m.innerHTML = 'Установка не удалась, подробности выше. <button class="btn small acc" id="retry">Повторить</button>'; $("#retry").onclick = () => startInstall(); }
       $("#back").style.visibility = "visible";

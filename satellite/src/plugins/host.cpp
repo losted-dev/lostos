@@ -24,8 +24,6 @@
 
 #include "core/log.h"
 #include "plugins/trust.h"
-#include "update/https.h"
-#include <thread>
 
 namespace cs {
 
@@ -518,8 +516,8 @@ void PluginHost::event(const std::string &name, const std::string &data) {
 }
 
 void PluginHost::install(const std::string &id, const std::string &url, const std::string &sha, const std::string &perms, const std::string &dl) {
-  if (!valid_id(id) || (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) || sha.size() != 64 || sha.find_first_not_of("0123456789abcdef") != std::string::npos ||
-      (!dl.empty() && (dl.rfind("http://", 0) != 0 && dl.rfind("https://", 0) != 0))) {
+  if (!valid_id(id) || url.rfind("http://", 0) != 0 || sha.size() != 64 || sha.find_first_not_of("0123456789abcdef") != std::string::npos ||
+      (!dl.empty() && dl.rfind("http://", 0) != 0)) {
     LOGW("plugin install refused: bad arguments");
     return;
   }
@@ -539,59 +537,25 @@ void PluginHost::install(const std::string &id, const std::string &url, const st
   mkdir(dir(id).c_str(), 0755);
   plugins_[id] = p;
   save(p);
-  if (url.rfind("https://", 0) == 0) {
-    const std::string directory = dir(id);
-    std::thread([directory, url, sha, dl, id] {
-      unlink((directory + "/ready").c_str());
-      unlink((directory + "/error").c_str());
-      mkdir((directory + "/root").c_str(), 0755);
-      const std::string temporary = directory + "/root/plugin.tmp";
-      if (!https_save(url, temporary, 6u << 20)) {
-        std::ofstream(directory + "/error") << "не скачался по HTTPS";
-        return;
-      }
-      std::ifstream input(temporary, std::ios::binary);
-      const std::string binary((std::istreambuf_iterator<char>(input)), {});
-      if (sha256_hex(binary) != sha) {
-        unlink(temporary.c_str());
-        std::ofstream(directory + "/error") << "контрольная сумма не сошлась";
-        return;
-      }
-      mkdir((directory + "/trust").c_str(), 0755);
-      for (const char *file : {"lostos-signature.json", "manifest.json", "developers.json", "developers.json.sig"}) {
-        const std::string path = directory + "/trust/" + file;
-        unlink(path.c_str());
-        const bool package = std::string(file) == "lostos-signature.json" || std::string(file) == "manifest.json";
-        if (!dl.empty()) https_save(dl + "/" + (package ? id + "/trust/" : "") + file, path, 512u << 10);
-      }
-      chmod(temporary.c_str(), 0755);
-      if (rename(temporary.c_str(), (directory + "/root/plugin").c_str()) != 0) {
-        std::ofstream(directory + "/error") << "не сохранился";
-        return;
-      }
-      std::ofstream(directory + "/ready");
-    }).detach();
-  } else {
-    pid_t pid = fork();
-    if (pid == 0) {
-      if (fork() == 0) {
-        setsid();
-        for (int fd = 3; fd < 1024; fd++) close(fd);
-        const int nul = open("/dev/null", O_RDWR);
-        dup2(nul, 0), dup2(nul, 1), dup2(nul, 2);
-        const char *script =
-            "d=$1; rm -f \"$d/ready\" \"$d/error\"; mkdir -p \"$d/root\" && wget -q -T 30 -O \"$d/root/plugin.tmp\" \"$2\" || { echo 'не скачался' > \"$d/error\"; exit 1; };"
-            "got=$(sha256sum \"$d/root/plugin.tmp\" | cut -d' ' -f1); [ \"$got\" = \"$3\" ] || { rm -f \"$d/root/plugin.tmp\"; echo 'контрольная сумма не сошлась' > \"$d/error\"; exit 1; };"
-            "rm -rf \"$d/trust\"; if [ -n \"$4\" ]; then mkdir -p \"$d/trust\"; "
-            "for f in lostos-signature.json manifest.json; do wget -q -T 20 -O \"$d/trust/$f\" \"$4/$5/trust/$f\" || rm -f \"$d/trust/$f\"; done; "
-            "for f in developers.json developers.json.sig; do wget -q -T 20 -O \"$d/trust/$f\" \"$4/$f\" || rm -f \"$d/trust/$f\"; done; fi; "
-            "chmod 755 \"$d\" \"$d/root\" \"$d/root/plugin.tmp\"; mv \"$d/root/plugin.tmp\" \"$d/root/plugin\"; : > \"$d/ready\"";
-        execl("/bin/sh", "sh", "-c", script, "sh", dir(id).c_str(), url.c_str(), sha.c_str(), dl.c_str(), id.c_str(), static_cast<char *>(nullptr));
-      }
-      _exit(0);
+  pid_t pid = fork();
+  if (pid == 0) {
+    if (fork() == 0) {
+      setsid();
+      for (int fd = 3; fd < 1024; fd++) close(fd);
+      const int nul = open("/dev/null", O_RDWR);
+      dup2(nul, 0), dup2(nul, 1), dup2(nul, 2);
+      const char *script =
+          "d=$1; rm -f \"$d/ready\" \"$d/error\"; mkdir -p \"$d/root\" && wget -q -T 30 -O \"$d/root/plugin.tmp\" \"$2\" || { echo 'не скачался' > \"$d/error\"; exit 1; };"
+          "got=$(sha256sum \"$d/root/plugin.tmp\" | cut -d' ' -f1); [ \"$got\" = \"$3\" ] || { rm -f \"$d/root/plugin.tmp\"; echo 'контрольная сумма не сошлась' > \"$d/error\"; exit 1; };"
+          "rm -rf \"$d/trust\"; if [ -n \"$4\" ]; then mkdir -p \"$d/trust\"; "
+          "for f in lostos-signature.json manifest.json; do wget -q -T 20 -O \"$d/trust/$f\" \"$4/$5/trust/$f\" || rm -f \"$d/trust/$f\"; done; "
+          "for f in developers.json developers.json.sig; do wget -q -T 20 -O \"$d/trust/$f\" \"$4/$f\" || rm -f \"$d/trust/$f\"; done; fi; "
+          "chmod 755 \"$d\" \"$d/root\" \"$d/root/plugin.tmp\"; mv \"$d/root/plugin.tmp\" \"$d/root/plugin\"; : > \"$d/ready\"";
+      execl("/bin/sh", "sh", "-c", script, "sh", dir(id).c_str(), url.c_str(), sha.c_str(), dl.c_str(), id.c_str(), static_cast<char *>(nullptr));
     }
-    if (pid > 0) waitpid(pid, nullptr, 0);
+    _exit(0);
   }
+  if (pid > 0) waitpid(pid, nullptr, 0);
   if (state_changed) state_changed(id + "\tdownloading\t");
   auto tries = std::make_shared<int>(0);
   auto poll = std::make_shared<std::function<void()>>();

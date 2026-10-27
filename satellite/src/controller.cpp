@@ -25,8 +25,6 @@
 #include "core/log.h"
 #include "esphome/mdns.h"
 #include "update/updater.h"
-#include "update/https.h"
-#include <thread>
 
 namespace cs {
 namespace {
@@ -1246,7 +1244,7 @@ void Controller::alarm_command(const std::string &cmd) {
     a.reminder = is_rem;
     a.at = parse_epochs(csv);
     if (is_rem && !a.at.empty()) {
-      if ((url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) || url.size() > 300) return;
+      if (url.rfind("http://", 0) != 0 || url.size() > 300) return;
       alarm_fetch(a.id, url);
     }
     alarms_.erase(std::remove_if(alarms_.begin(), alarms_.end(), [&](const Alarm &x) { return !x.snooze && x.id == a.id; }), alarms_.end());
@@ -1264,12 +1262,6 @@ void Controller::alarm_fetch(const std::string &id, const std::string &url) {
   const std::string file = std::string(kRemDir) + id + ".wav";
   if (access(file.c_str(), R_OK) == 0) return;
   mkdir(kRemDir, 0755);
-  if (url.rfind("https://", 0) == 0) {
-    std::thread([file, url] {
-      https_save(url, file, 8u << 20);
-    }).detach();
-    return;
-  }
   pid_t pid = fork();
   if (pid < 0) return;
   if (pid == 0) {

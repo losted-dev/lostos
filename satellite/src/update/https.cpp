@@ -2,7 +2,6 @@
 #include "update/tls.h"
 
 #include <dlfcn.h>
-#include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
@@ -14,7 +13,6 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
-#include <fstream>
 
 #include "core/log.h"
 
@@ -48,8 +46,6 @@ struct Ssl {
   int (*SSL_set_fd)(void *, int);
   long (*SSL_ctrl)(void *, int, long, void *);
   int (*SSL_set1_host)(void *, const char *);
-  void *(*SSL_get0_param)(void *);
-  int (*X509_VERIFY_PARAM_set1_ip_asc)(void *, const char *);
   int (*SSL_connect)(void *);
   int (*SSL_read)(void *, void *, int);
   int (*SSL_write)(void *, const void *, int);
@@ -104,8 +100,7 @@ const Ssl &ssl() {
           sym(h, "SSL_CTX_set_verify", s.SSL_CTX_set_verify, m) && sym(h, "SSL_CTX_ctrl", s.SSL_CTX_ctrl, m) &&
           sym(h, "SSL_new", s.SSL_new, m) && sym(h, "SSL_free", s.SSL_free, m) &&
           sym(h, "SSL_set_fd", s.SSL_set_fd, m) && sym(h, "SSL_ctrl", s.SSL_ctrl, m) &&
-          sym(h, "SSL_set1_host", s.SSL_set1_host, m) && sym(h, "SSL_get0_param", s.SSL_get0_param, m) &&
-          sym(h, "X509_VERIFY_PARAM_set1_ip_asc", s.X509_VERIFY_PARAM_set1_ip_asc, m) && sym(h, "SSL_connect", s.SSL_connect, m) &&
+          sym(h, "SSL_set1_host", s.SSL_set1_host, m) && sym(h, "SSL_connect", s.SSL_connect, m) &&
           sym(h, "SSL_read", s.SSL_read, m) && sym(h, "SSL_write", s.SSL_write, m) &&
           sym(h, "SSL_shutdown", s.SSL_shutdown, m) && sym(h, "SSL_get_error", s.SSL_get_error, m) &&
           sym(h, "SSL_get_verify_result", s.SSL_get_verify_result, m) &&
@@ -213,18 +208,23 @@ class Conn {
     }
     if (fd_ >= 0) close(fd_);
   }
-  bool open(const Url &u, std::string &err, const std::string &ca_file) {
-    TlsSock socket;
-    if (!tls_connect(u.host, u.port, socket, err, ca_file)) return false;
-    fd_ = socket.fd;
-    ssl_ = socket.ssl;
-    fcntl(fd_, F_SETFL, fcntl(fd_, F_GETFL) & ~O_NONBLOCK);
-    timeval timeout{kIoTimeoutS, 0};
-    setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
-    setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
+  bool open(const Url &u, std::string &err) {
+    fd_ = tcp_connect(u.host, u.port, err);
+    if (fd_ < 0) return false;
+    s_.ERR_clear_error();
+    ssl_ = s_.SSL_new(s_.ctx);
+    if (!ssl_) return err = ssl_error(s_, "SSL_new"), false;
+    s_.SSL_set_fd(ssl_, fd_);
+    s_.SSL_ctrl(ssl_, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, const_cast<char *>(u.host.c_str()));
+    s_.SSL_set1_host(ssl_, u.host.c_str());
+    if (s_.SSL_connect(ssl_) != 1) {
+      long v = s_.SSL_get_verify_result(ssl_);
+      err = v != 0 ? "TLS " + u.host + ": certificate: " + s_.X509_verify_cert_error_string(v)
+                   : ssl_error(s_, ("TLS " + u.host).c_str());
+      return false;
+    }
     return true;
   }
-
   bool write_all(const std::string &d) {
     size_t off = 0;
     while (off < d.size()) {
@@ -312,32 +312,17 @@ constexpr int kEd25519 = 1087;  // EVP_PKEY_ED25519 (NID_ED25519), the same in 1
 constexpr int SSL_CTRL_MODE = 33;
 constexpr long SSL_MODE_ENABLE_PARTIAL_WRITE = 1, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER = 2;
 
-bool tls_connect(const std::string &host, const std::string &port, TlsSock &t, std::string &err, const std::string &ca_file) {
+bool tls_connect(const std::string &host, const std::string &port, TlsSock &t, std::string &err) {
   const Ssl &s = ssl();
   if (!s.ok) return err = s.error, false;
   t.fd = tcp_connect(host, port, err);
   if (t.fd < 0) return false;
   s.ERR_clear_error();
-  void *ctx = s.ctx;
-  if (!ca_file.empty()) {
-    ctx = s.SSL_CTX_new(s.TLS_client_method());
-    if (!ctx) return err = "SSL_CTX_new failed", tls_close(t), false;
-    s.SSL_CTX_ctrl(ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, TLS1_2_VERSION, nullptr);
-    s.SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
-    if (s.SSL_CTX_load_verify_locations(ctx, ca_file.c_str(), nullptr) != 1) {
-      s.SSL_CTX_free(ctx);
-      return err = "cannot load local link CA", tls_close(t), false;
-    }
-  }
-  t.ssl = s.SSL_new(ctx);
-  if (ctx != s.ctx) s.SSL_CTX_free(ctx);
+  t.ssl = s.SSL_new(s.ctx);
   if (!t.ssl) return err = ssl_error(s, "SSL_new"), tls_close(t), false;
   s.SSL_set_fd(t.ssl, t.fd);
   s.SSL_ctrl(t.ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, const_cast<char *>(host.c_str()));
-  unsigned char ip[16];
-  const bool numeric = inet_pton(AF_INET, host.c_str(), ip) == 1 || inet_pton(AF_INET6, host.c_str(), ip) == 1;
-  const int identity = numeric ? s.X509_VERIFY_PARAM_set1_ip_asc(s.SSL_get0_param(t.ssl), host.c_str()) : s.SSL_set1_host(t.ssl, host.c_str());
-  if (identity != 1) return err = "cannot set TLS peer identity", tls_close(t), false;
+  s.SSL_set1_host(t.ssl, host.c_str());
   if (s.SSL_connect(t.ssl) != 1) {
     long v = s.SSL_get_verify_result(t.ssl);
     err = v != 0 ? "TLS " + host + ": certificate: " + s.X509_verify_cert_error_string(v) : ssl_error(s, ("TLS " + host).c_str());
@@ -468,35 +453,9 @@ std::string sha256_hex(const std::string &data) {
   return out;
 }
 
-std::string link_ca_for_url(const std::string &url) {
-  const std::string ca = "/data/lostos/link-ca.crt";
-  if (access(ca.c_str(), R_OK) != 0) return "";
-  std::ifstream config("/data/lostos/link.conf");
-  std::string line;
-  while (std::getline(config, line)) {
-    if (line.rfind("server=https://", 0) != 0) continue;
-    std::string server = line.substr(7);
-    while (!server.empty() && (server.back() == '/' || server.back() == '\r' || server.back() == ' ')) server.pop_back();
-    return url.rfind(server + "/", 0) == 0 ? ca : "";
-  }
-  return "";
-}
-
-bool https_save(const std::string &url, const std::string &path, size_t max_bytes) {
-  auto response = https_get(url, {}, max_bytes, {}, nullptr, 0, link_ca_for_url(url));
-  if (response.status != 200 || !response.error.empty()) return false;
-  const std::string temporary = path + ".part";
-  std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-  output.write(response.body.data(), response.body.size());
-  output.close();
-  if (!output.fail() && rename(temporary.c_str(), path.c_str()) == 0) return true;
-  unlink(temporary.c_str());
-  return false;
-}
-
 HttpsResponse https_get(const std::string &url_in, const std::vector<std::string> &headers, size_t max_bytes,
                         const std::function<void(size_t, size_t)> &progress, const std::atomic<bool> *cancel,
-                        int max_redirects, const std::string &ca_file) {
+                        int max_redirects) {
   HttpsResponse r;
   const Ssl &s = ssl();
   if (!s.ok) {
@@ -512,7 +471,7 @@ HttpsResponse https_get(const std::string &url_in, const std::vector<std::string
     }
     errno = 0;
     Conn c(s);
-    if (!c.open(u, r.error, ca_file)) return r;
+    if (!c.open(u, r.error)) return r;
     std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.host + "\r\nConnection: close\r\nAccept-Encoding: identity\r\n";
     for (const auto &h : headers) req += h + "\r\n";
     req += "\r\n";

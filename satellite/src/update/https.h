@@ -24,10 +24,7 @@ struct HttpsResponse {
 // between reads.
 HttpsResponse https_get(const std::string &url, const std::vector<std::string> &headers, size_t max_bytes,
                         const std::function<void(size_t, size_t)> &progress = {},
-                        const std::atomic<bool> *cancel = nullptr, int max_redirects = 5, const std::string &ca_file = "");
-
-std::string link_ca_for_url(const std::string &url);
-bool https_save(const std::string &url, const std::string &path, size_t max_bytes);
+                        const std::atomic<bool> *cancel = nullptr, int max_redirects = 5);
 
 // Lower-case hex SHA-256 via the firmware's libcrypto; "" if it is unavailable.
 std::string sha256_hex(const std::string &data);
