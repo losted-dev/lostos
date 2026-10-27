@@ -7,6 +7,8 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -56,7 +58,7 @@ func fetchPayload(tag string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if sum(b) != want {
+	if got := sha256.Sum256(b); hex.EncodeToString(got[:]) != want {
 		return "", fmt.Errorf("%s does not match the SHA256SUMS of the release %s: nothing is installed from it", payloadAsset, tag)
 	}
 	_ = os.RemoveAll(dir)

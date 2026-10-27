@@ -72,13 +72,13 @@ func adbCmd(args ...string) *exec.Cmd { return exec.Command(adbPath, args...) }
 
 func push(s, local, remote string) error {
 	c := adbCmd("-s", s, "push", local, remote)
-	c.Stderr = os.Stderr
+	c.Stderr = errw // the log of the wizard shows what adb says, as the terminal does
 	return c.Run()
 }
 
 func pull(s, remote, local string) error {
 	c := adbCmd("-s", s, "pull", remote, local)
-	c.Stderr = os.Stderr
+	c.Stderr = errw
 	return c.Run()
 }
 
