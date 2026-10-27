@@ -23,7 +23,10 @@ jobs:
           tar -xf zig.tar.xz
           echo "$PWD/zig-x86_64-linux-0.14.1" >> "$GITHUB_PATH"
       - name: Build the daemon (armhf, aarch64)
-        run: make -C satellite -j"$(nproc)"
+        run: |
+          # one architecture after the other: both fetch the same third-party sources and a parallel run makes them delete each other's checkout
+          make -C satellite armhf -j"$(nproc)"
+          make -C satellite aarch64 -j"$(nproc)"
       - name: Files of the release
         run: |
           mkdir out
