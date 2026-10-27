@@ -90,7 +90,7 @@ func TestSetupLocalServerEndToEnd(t *testing.T) {
 	if !ok {
 		t.Fatal("setup failed")
 	}
-	if !helloOK("http://127.0.0.1:18765") {
+	if !helloOK(url) {
 		t.Fatalf("the server does not answer (%s)", url)
 	}
 }

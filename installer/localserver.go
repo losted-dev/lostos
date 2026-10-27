@@ -331,13 +331,8 @@ func autostartAndStart(dir string) error {
 }
 
 func helloOK(base string) bool {
-	c := &http.Client{Timeout: 2 * time.Second}
-	resp, err := c.Get(base + "/api/v1/hello")
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode == 200
+	_, err := hello(base)
+	return err == nil
 }
 
 // setupLocalServer does everything. speaker is the address of the speaker ("192.168.1.7:5555"): it tells which address of this computer the speaker can reach.
@@ -351,7 +346,7 @@ func setupLocalServer(speaker string) (string, string, bool) {
 	dir := localDir()
 	oldEnv, _ := os.ReadFile(filepath.Join(dir, "app", ".env"))
 	port := pickPort(string(oldEnv))
-	url := fmt.Sprintf("http://%s:%d", ip, port)
+	url := fmt.Sprintf("https://%s:%d", ip, port)
 	fmt.Fprintf(out, "== сервер на этом компьютере (%s)\n", url)
 	py, err := findPython()
 	if err != nil {
@@ -389,17 +384,26 @@ func setupLocalServer(speaker string) (string, string, bool) {
 		fmt.Fprintln(errw, "ошибка pip:", err)
 		return "", "", false
 	}
+	cert := exec.Command(vp, "-c", "import certs,sys; assert callable(getattr(certs, 'local_context', None)), 'Update lostos-server for local TLS support'; certs.ensure({sys.argv[1]})", ip)
+	cert.Dir = app
+	cert.Env = append(os.Environ(), "LOSTOS_DATA="+data)
+	if output, err := cert.CombinedOutput(); err != nil {
+		fmt.Fprintf(errw, "не удалось создать сертификат: %v\n%s\n", err, output)
+		return "", "", false
+	}
+	localRoots.Store(url, filepath.Join(data, "certs", "ca.crt"))
 	envPath := filepath.Join(app, ".env")
 	old, _ := os.ReadFile(envPath)
 	env := mergeEnv(string(old), map[string]string{
-		"LOSTOS_LITE": "1", "LOSTOS_AUTH": "1", "LOSTOS_PUBLIC_URL": url, "TTS_PORT": fmt.Sprint(port),
+		"LOSTOS_LITE": "1", "LOSTOS_AUTH": "1", "LOSTOS_LOCAL_TLS": "1", "LOSTOS_PUBLIC_URL": url, "TTS_PORT": fmt.Sprint(port),
 		"LOSTOS_DATA": filepath.ToSlash(data), "LOSTOS_BIND": "0.0.0.0", "LOSTOS_NO_LOCAL_ENGINES": "1",
 	})
 	if err := os.WriteFile(envPath, []byte(env), 0o600); err != nil {
 		fmt.Fprintln(errw, err)
 		return "", "", false
 	}
-	local := fmt.Sprintf("http://127.0.0.1:%d", port)
+	fmt.Fprintf(out, "Для входа в панель добавьте локальный CA в доверенные сертификаты браузера: %s\n", filepath.Join(data, "certs", "ca.crt"))
+	local := url
 	if helloOK(local) {
 		fmt.Fprintln(out, "сервер уже запущен: чтобы он взял новый код, перезапустите его (или перезагрузите компьютер)")
 	} else {

@@ -240,13 +240,11 @@ void LinkClient::run() {
 bool LinkClient::session() {
   const std::string server = read_server();
   std::string host = server, port = "443";
-  const bool plain = host.rfind("http://", 0) == 0;
-  if (!plain && host.rfind("https://", 0) != 0) {
-    LOGW("link: only https:// servers (or http:// inside the home network), got '%s'", server.c_str());
+  if (host.rfind("https://", 0) != 0) {
+    LOGW("link: only https:// servers, got '%s'", server.c_str());
     return false;
   }
-  host.erase(0, plain ? 7 : 8);
-  if (plain) port = "80";
+  host.erase(0, 8);
   if (size_t sl = host.find('/'); sl != std::string::npos) host.erase(sl);
   if (size_t c = host.find(':'); c != std::string::npos) {
     port = host.substr(c + 1);
@@ -263,17 +261,10 @@ bool LinkClient::session() {
     fclose(f);
   }
 
-  if (plain) {   // no encryption: only for a server of the owner inside his own network (a private IPv4 address, localhost or a name of the local network)
-    std::string h = host.substr(0, host.find(':'));
-    const bool local = private_ipv4(h) || h == "localhost" || (h.size() > 6 && h.compare(h.size() - 6, 6, ".local") == 0);
-    if (!local) {
-      LOGW("link: http:// is allowed only for an address of the home network, got '%s'", h.c_str());
-      return false;
-    }
-  }
   TlsSock t;
   std::string err;
-  if (!(plain ? plain_connect(host, port, t, err) : tls_connect(host, port, t, err))) {
+  const std::string ca = std::string(kDir) + "/link-ca.crt";
+  if (!tls_connect(host, port, t, err, access(ca.c_str(), F_OK) == 0 ? ca : "")) {
     LOGW("link: %s", err.c_str());
     return false;
   }

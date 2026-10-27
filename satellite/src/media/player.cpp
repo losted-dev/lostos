@@ -31,6 +31,7 @@
 #include <thread>
 
 #include "core/log.h"
+#include "update/https.h"
 
 namespace cs {
 
@@ -140,6 +141,7 @@ struct Api {
   unsigned (*g_timeout_add)(unsigned ms, GSourceFunc fn, gp data);
   int (*g_source_remove)(unsigned id);
   void (*g_object_set)(gp obj, const char *first, ...);
+  unsigned long (*g_signal_connect_data)(gp, const char *, void (*)(), gp, void (*)(gp, gp), int);
   void (*g_error_free)(gp err);
   void (*g_free)(gp p);
   uint32_t (*g_quark_try_string)(const char *s);  // optional, like the two below: retry/resume only
@@ -190,6 +192,7 @@ bool load_api(void *&glib, void *&gst) {
   ok &= sym(glib, "g_timeout_add", g.g_timeout_add);
   ok &= sym(glib, "g_source_remove", g.g_source_remove);
   ok &= sym(glib, "g_object_set", g.g_object_set);
+  ok &= sym(glib, "g_signal_connect_data", g.g_signal_connect_data);
   ok &= sym(glib, "g_error_free", g.g_error_free);
   ok &= sym(glib, "g_free", g.g_free);
   g.g_quark_try_string = reinterpret_cast<decltype(g.g_quark_try_string)>(dlsym(glib, "g_quark_try_string"));
@@ -529,6 +532,13 @@ struct Player::Impl {
     return 1;
   }
 
+  static void source_setup(gp, gp source, gp user) {
+    const auto &channel = *static_cast<Chan *>(user);
+    if (channel.index >= channel.urls.size()) return;
+    const std::string ca = link_ca_for_url(channel.urls[channel.index]);
+    if (!ca.empty()) g.g_object_set(source, "ssl-ca-file", ca.c_str(), "ssl-strict", 1, nullptr);
+  }
+
   void gst_thread() {
     g.g_main_loop_run(mainloop);
     for (auto &c : chans) {
@@ -598,6 +608,7 @@ bool Player::init() {
       LOGW("player: playbin: %s", gerror_message(perr));
       g.g_error_free(perr);
     }
+    g.g_signal_connect_data(c.pipe, "source-setup", reinterpret_cast<void (*)()>(&Impl::source_setup), &c, nullptr, 0);
     g.g_object_set(c.pipe, "flags", kPlayFlags, nullptr);
     g.g_object_set(c.pipe, "volume", 1.0, nullptr);
     if (c.id == Channel::ANNOUNCE) g.g_object_set(c.pipe, "buffer-duration", kAnnounceBufferNs, nullptr);

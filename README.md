@@ -27,3 +27,9 @@ It needs root `adb` on the speaker; it does not give you root. Releases contain 
 `satellite/Makefile` builds the daemon with zig for ARM (see `satellite/third_party/fetch.sh` for what it downloads).
 
 License: MIT (the code of the pulsar project, which the first version is built on, is MIT as well).
+
+## Security changes and migration
+
+Station links require HTTPS, including on the LAN. The local-server installer creates a persistent private CA under its data directory, provisions only the public CA to the speaker through ADB, and prints the CA path for browser trust setup. Update the server and firmware together, restart an existing HTTP server, and rerun the installer to migrate the station link.
+
+`--ssh` uses public-key authentication only. Provision your own public key in the root account’s `authorized_keys` through ADB before trying SSH; no password fallback is provided. Reinstalling SSH replaces an existing lostOS Dropbear process so an old password-enabled daemon does not remain active.

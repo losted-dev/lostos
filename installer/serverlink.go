@@ -1,16 +1,20 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,7 +45,7 @@ func checkServer(raw string) (serverInfo, error) {
 		bases = []string{strings.TrimRight(raw, "/")}
 	} else {
 		h := strings.TrimRight(raw, "/")
-		bases = []string{"https://" + h, "http://" + h + ":8765", "http://" + h}
+		bases = []string{"https://" + h}
 	}
 	var last error
 	for _, b := range bases {
@@ -56,8 +60,39 @@ func checkServer(raw string) (serverInfo, error) {
 	return serverInfo{}, last
 }
 
+var localRoots sync.Map
+
+func serverClient(base string) (*http.Client, error) {
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return nil, errors.New("сервер должен использовать HTTPS")
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if path, ok := localRoots.Load(base); ok {
+		pem, err := os.ReadFile(path.(string))
+		if err != nil {
+			return nil, err
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, errors.New("неверный сертификат локального сервера")
+		}
+		transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	}
+	return &http.Client{Timeout: 6 * time.Second, Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 || req.URL.Scheme != "https" || req.URL.Host != u.Host {
+				return errors.New("небезопасное перенаправление сервера")
+			}
+			return nil
+		}}, nil
+}
+
 func hello(base string) (serverInfo, error) {
-	c := &http.Client{Timeout: 6 * time.Second}
+	c, err := serverClient(base)
+	if err != nil {
+		return serverInfo{}, err
+	}
 	resp, err := c.Get(base + "/api/v1/hello")
 	if err != nil {
 		return serverInfo{}, fmt.Errorf("нет ответа от %s", base)
@@ -76,7 +111,7 @@ func hello(base string) (serverInfo, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil || h.Lostos != "server" {
 		return serverInfo{}, fmt.Errorf("%s отвечает, но это не сервер lostOS", base)
 	}
-	return serverInfo{URL: base, Version: h.Version, Lite: h.Lite, Secure: strings.HasPrefix(base, "https://") || homeURL(base), Plain: homeURL(base), Registration: h.Registration, Tagline: strings.TrimSpace(h.Tagline)}, nil
+	return serverInfo{URL: base, Version: h.Version, Lite: h.Lite, Secure: true, Plain: false, Registration: h.Registration, Tagline: strings.TrimSpace(h.Tagline)}, nil
 }
 
 // homeURL: an http:// address that points inside the home network (a private IPv4 address, localhost, a name .local). The firmware accepts plain http for these and for nothing else.
@@ -98,7 +133,7 @@ var forwardRe = regexp.MustCompile(`^[A-Za-z0-9]{1,16}=\d{1,3}\.\d{1,3}\.\d{1,3}
 // waits until the station has a link id. The firmware only talks to https servers and only forwards private IPv4 addresses.
 func configureLink(s, serverURL string, forwards []string) bool {
 	serverURL = strings.TrimRight(strings.TrimSpace(serverURL), "/")
-	if !strings.HasPrefix(serverURL, "https://") && !homeURL(serverURL) {
+	if _, err := serverClient(serverURL); err != nil {
 		fmt.Fprintf(errw, "%s: станция подключается к серверу только по HTTPS (адрес %q не подходит)\n", s, serverURL)
 		return false
 	}
@@ -135,6 +170,14 @@ func configureLink(s, serverURL string, forwards []string) bool {
 		return false
 	}
 	fmt.Fprintf(out, "== %s: связь с сервером %s\n", s, serverURL)
+	if ca, ok := localRoots.Load(serverURL); ok {
+		if push(s, ca.(string), dataDir+"/link-ca.crt.new") != nil ||
+			shTo(out, s, "mv "+dataDir+"/link-ca.crt.new "+dataDir+"/link-ca.crt && chmod 600 "+dataDir+"/link-ca.crt") != nil {
+			return false
+		}
+	} else if shTo(out, s, "rm -f "+dataDir+"/link-ca.crt") != nil {
+		return false
+	}
 	if push(s, tmp, dataDir+"/link.conf.new") != nil ||
 		shTo(out, s, "mv "+dataDir+"/link.conf.new "+dataDir+"/link.conf && chmod 600 "+dataDir+"/link.conf && sync") != nil {
 		return false

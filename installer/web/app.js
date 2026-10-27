@@ -109,13 +109,13 @@ const RENDER = {
       (S.srvType === "url" ? `<div style="margin:10px 4px 4px"><div class="row"><input class="field" id="surl" placeholder="https://адрес-сервера" value="${esc(S.srvUrl)}" style="flex:1"><button class="btn small acc" id="scheck">Проверить</button></div><div id="sres"></div>
         <div class="sect">Home Assistant дома (по желанию)</div><input class="field" id="sha" placeholder="IP:порт, например 192.168.1.5:8123" value="${esc(S.ha)}"><p class="msg" id="shamsg"></p><p class="hint">Колонка пробросит этот адрес вашей домашней сети серверу: так ассистент управляет умным домом, а Home Assistant не открывается в интернет.</p></div>` : "") +
       T("local", "pc", "Сервер на этом компьютере", "Для дома, без интернета и домена: установщик сам поставит маленький сервер (нужен Python 3.11+) и подключит к нему колонку.") +
-      (S.srvType === "local" ? `<div style="margin:10px 4px 4px"><p class="msg">Сервер будет жить в вашей папке пользователя и запускаться при входе в систему. Связь колонки с ним идёт внутри домашней сети без шифрования: пользуйтесь им дома, в сети, которой доверяете.</p>
+      (S.srvType === "local" ? `<div style="margin:10px 4px 4px"><p class="msg">Сервер будет жить в вашей папке пользователя и запускаться при входе в систему. Связь колонки с сервером защищена HTTPS. Установщик покажет файл сертификата, который нужно добавить в доверенные сертификаты браузера.</p>
         <div class="sect">Home Assistant дома (по желанию)</div><input class="field" id="sha" placeholder="IP:порт, например 192.168.1.5:8123" value="${esc(S.ha)}"><p class="msg" id="shamsg"></p></div>` : "") +
       T("speaker", "chip", "Сервер в колонке", "Лёгкий сервер прямо на Станции, компьютер не нужен. В разработке.", true);
     document.querySelectorAll("[data-type]").forEach((e) => e.onclick = () => { if (!e.classList.contains("off")) { S.srvType = e.dataset.type; S.srvInfo = null; paint(); } });
     const upd = () => { if (S.srvType === "local") { next.disabled = !normHA(S.ha).ok; return; } next.disabled = !(S.srvType === "url" && S.srvInfo && S.srvInfo.secure && !S.srvInfo.banned && (S.srvInfo.known || S.srvTrust) && normHA(S.ha).ok); };
     if (S.srvType === "url") {
-      const showRes = () => { const r = $("#sres"); if (!S.srvInfo) { r.innerHTML = ""; return; } const i = S.srvInfo; r.innerHTML = i.secure ? `<p class="msg ok">✓ Сервер lostOS ${esc(i.version || "")} · ${esc(i.url)}</p>` + (i.plain ? '<p class="msg">Домашний сервер без шифрования: связь видна всем в вашей сети Wi-Fi, поэтому используйте его только дома</p>' : "") + srvBanner(i) : `<p class="msg bad">Сервер найден (${esc(i.url)}), но без HTTPS. Из интернета колонка подключается только к HTTPS-серверу: поставьте перед ним Caddy или nginx с сертификатом. Адрес без шифрования годится только внутри домашней сети (192.168.x.y)</p>`; };
+      const showRes = () => { const r = $("#sres"); if (!S.srvInfo) { r.innerHTML = ""; return; } const i = S.srvInfo; r.innerHTML = i.secure ? `<p class="msg ok">✓ Сервер lostOS ${esc(i.version || "")} · ${esc(i.url)}</p>` + srvBanner(i) : `<p class="msg bad">Сервер найден (${esc(i.url)}), но без HTTPS. Колонка подключается только к HTTPS-серверу: поставьте перед ним Caddy или nginx с сертификатом.</p>`; };
       $("#scheck").onclick = async () => { S.srvUrl = $("#surl").value.trim(); $("#sres").innerHTML = '<p class="msg"><span class="spin"></span>Проверяю…</p>'; const r = await api("server", { url: S.srvUrl }); S.srvInfo = r.ok ? r.server : null; S.srvTrust = false; if (!r.ok) $("#sres").innerHTML = `<p class="msg bad">${esc(r.error)}</p>`; else showRes(); upd(); };
       const haMsg = () => { const r = normHA(S.ha); const m = $("#shamsg"); if (m) { m.textContent = r.ok ? (r.value && r.value !== S.ha ? "Будет записан адрес " + r.value : "") : r.error; m.className = "msg" + (r.ok ? "" : " bad"); } };
       $("#sha").oninput = () => { S.ha = $("#sha").value.trim(); haMsg(); upd(); };
@@ -210,7 +210,7 @@ async function startInstall() {
     if (j.done) {
       S.installing = false; S.installOk = j.ok;
       const m = $("#imsg");
-      if (j.ok && S.srvType === "local" && j.result) { S.srvUrl = j.result.server || ""; S.srvInfo = { url: S.srvUrl, plain: true }; S.setupLink = j.result.setup || ""; }
+      if (j.ok && S.srvType === "local" && j.result) { S.srvUrl = j.result.server || ""; S.srvInfo = { url: S.srvUrl, secure: true, plain: false }; S.setupLink = j.result.setup || ""; }
       if (j.ok) { S.link = j.result && j.result.id ? { id: j.result.id, state: j.result.state } : null; m.className = "msg ok"; m.textContent = "Установка завершена."; $("#next").disabled = false; }
       else { m.className = "msg bad"; m.innerHTML = 'Установка не удалась, подробности выше. <button class="btn small acc" id="retry">Повторить</button>'; $("#retry").onclick = () => startInstall(); }
       $("#back").style.visibility = "visible";
