@@ -22,6 +22,10 @@ jobs:
           curl -fL -o zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
           tar -xf zig.tar.xz
           echo "$PWD/zig-x86_64-linux-0.14.1" >> "$GITHUB_PATH"
+      - name: Scripts and the compiler wrappers must be executable (the repository was made on Windows, which does not keep the bit)
+        run: |
+          find satellite -name '*.sh' -exec chmod +x {} +
+          chmod +x satellite/third_party/toolchain/*
       - name: Build the daemon (armhf, aarch64)
         run: |
           # one architecture after the other: both fetch the same third-party sources and a parallel run makes them delete each other's checkout
