@@ -61,14 +61,19 @@ jobs:
     needs: [firmware, installer]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: out, merge-multiple: true }
+      - name: The files that the installer takes from the release (it is one file on its own)
+        run: |
+          zip -qr out/lostos-payload.zip satellite/deploy satellite/models receivers
+          unzip -l out/lostos-payload.zip | tail -1
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           # the installers are named like any other asset; the checksums of everything go into SHA256SUMS next to the two daemons
-          (cd out && sha256sum lostos-install-* >> SHA256SUMS)
+          (cd out && sha256sum lostos-install-* lostos-payload.zip >> SHA256SUMS)
           flags="--draft --generate-notes --title $GITHUB_REF_NAME"
           case "$GITHUB_REF_NAME" in *-*) flags="$flags --prerelease";; esac
           gh release create "$GITHUB_REF_NAME" $flags out/* --repo "$GITHUB_REPOSITORY"

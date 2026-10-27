@@ -251,15 +251,25 @@ func run() int {
 		fmt.Fprintln(errw, err)
 		return 1
 	}
-	if root, err = findRoot(); err != nil {
-		fmt.Fprintln(errw, err)
-		return 1
-	}
 	if opts.catalog != "" {
 		catalogBase = strings.TrimRight(opts.catalog, "/")
 	}
 	if opts.repo != "" {
 		releaseRepo = opts.repo
+	}
+	if root, err = findRoot(); err != nil {
+		if opts.offline { // nothing may be downloaded: the files must be next to the installer
+			fmt.Fprintln(errw, err)
+			return 1
+		}
+		// the installer alone (the file from the page of the release): the rest comes from the release itself
+		dir, perr := fetchPayload(opts.version)
+		if perr != nil {
+			fmt.Fprintln(errw, "не найдены файлы установщика рядом с ним и не удалось взять их с GitHub:", perr)
+			fmt.Fprintln(errw, err)
+			return 1
+		}
+		root = dir
 	}
 	loadCatalog(root, opts.offline)
 	if opts.localServer { // the server of this computer, then the speakers get its address as --server
