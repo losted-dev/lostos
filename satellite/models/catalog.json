@@ -1,0 +1,50 @@
+{
+ "v": 1,
+ "models": [
+  {
+   "code": "cucumber",
+   "name": "Yandex Station Midi",
+   "arch": "aarch64",
+   "zigbee": true,
+   "builtin": true,
+   "status": "verified"
+  },
+  {
+   "code": "plum",
+   "name": "Yandex Station Lite 2",
+   "arch": "armhf",
+   "builtin": true,
+   "status": "verified"
+  },
+  {
+   "code": "bergamot",
+   "name": "Yandex Station Mini 3",
+   "arch": "armhf",
+   "builtin": true,
+   "status": "verified"
+  },
+  {
+   "code": "station-micro",
+   "name": "Yandex Station Lite (Micro)",
+   "arch": "armhf",
+   "status": "untested",
+   "profile": "station-micro.conf",
+   "sha256": "680832ec6dd5fbd70315d62097a45fcfbc9f5806ea9fcccef5cc36c26c504f36"
+  },
+  {
+   "code": "station-mini2",
+   "name": "Yandex Station Mini 2",
+   "arch": "armhf",
+   "status": "untested",
+   "profile": "station-mini2.conf",
+   "sha256": "5dadd0f94f2f036599aaacea091c276774261171cbcc33f5b5213734f20329c4"
+  },
+  {
+   "code": "station-midi",
+   "name": "Yandex Station 2",
+   "arch": "armhf",
+   "status": "preparing",
+   "note": "the lighting (a matrix of 84 points on top, a pixel display in front) needs a profile from a real speaker"
+  }
+ ]
+}

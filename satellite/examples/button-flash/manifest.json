@@ -1,0 +1,12 @@
+{
+  "id": "ru.lostos.button-flash",
+  "name": "Вспышка по кнопке",
+  "version": "1.0.0",
+  "author": "lostOS",
+  "api": "1",
+  "icon": "bolt",
+  "description": "Пример плагина для колонки: по нажатию центральной кнопки кольцо вспыхивает фиолетовым, а на часах появляется HI.",
+  "permissions": [],
+  "entry": "main.py",
+  "device": {"binary": "device/plugin", "permissions": ["events.subscribe", "device.led", "device.display"]}
+}

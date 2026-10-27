@@ -1,0 +1,66 @@
+# A tag vMAJOR.MINOR.PATCH builds the daemon for both architectures and prepares a DRAFT release: lostos-armhf.bin, lostos-aarch64.bin, SHA256SUMS and the installers.
+# Nothing is published by the robot: a person reads the draft and presses "Publish". "releases/latest" (what the installer and the speakers ask for) is the newest PUBLISHED release
+# that is not a pre-release: a tag with a dash (v0.4.0-rc1) becomes a pre-release and is passed over by everybody who did not ask for it with --version.
+# Speakers and the installer check lostos-<arch>.bin against the SHA256SUMS of the same release (no signature for the firmware: the protection is that of the repository, keep
+# two-step login on and protect the tags v*).
+name: Release
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
+permissions:
+  contents: write
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }                      # the daemon says its version from git describe
+      - name: Tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cmake ninja-build make patch git curl xz-utils unzip
+      - name: Zig
+        run: |
+          curl -fL -o zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-0.14.1" >> "$GITHUB_PATH"
+      - name: Build the daemon (armhf, aarch64)
+        run: make -C satellite -j"$(nproc)"
+      - name: Files of the release
+        run: |
+          mkdir out
+          cp satellite/build/armhf/lostos out/lostos-armhf.bin
+          cp satellite/build/aarch64/lostos out/lostos-aarch64.bin
+          (cd out && sha256sum lostos-armhf.bin lostos-aarch64.bin > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with: { name: firmware, path: out/ }
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+      - name: Test and build the installers
+        working-directory: installer
+        run: |
+          go vet ./... && go test ./...
+          mkdir -p ../out
+          for t in windows/amd64 linux/amd64 linux/arm64 darwin/arm64 darwin/amd64; do
+            os=${t%/*}; arch=${t#*/}; ext=""; [ "$os" = windows ] && ext=".exe"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "../out/lostos-install-$os-$arch$ext" .
+          done
+      - uses: actions/upload-artifact@v4
+        with: { name: installers, path: out/ }
+  draft:
+    needs: [firmware, installer]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # the installers are named like any other asset; the checksums of everything go into SHA256SUMS next to the two daemons
+          (cd out && sha256sum lostos-install-* >> SHA256SUMS)
+          flags="--draft --generate-notes --title $GITHUB_REF_NAME"
+          case "$GITHUB_REF_NAME" in *-*) flags="$flags --prerelease";; esac
+          gh release create "$GITHUB_REF_NAME" $flags out/* --repo "$GITHUB_REPOSITORY"

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="token" content="__TOKEN__">
+<title>Установка lostOS</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="ambient"></div>
+<main class="win">
+  <aside class="brand">
+    <div class="curve"></div>
+    <div class="brand-in">
+      <img class="app-ic" src="/icon.png" alt="">
+      <h1 class="logo"><svg class="logo-svg" role="img" aria-label="lostOS" viewBox="0 0 132 44"><text x="66" y="35" text-anchor="middle" font-family="-apple-system, 'SF Pro Display', 'SF Pro Text', 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif" font-size="42" letter-spacing="-1.26" fill="#fff"><tspan font-weight="300">lost</tspan><tspan font-weight="800" fill="#8b5cf6">OS</tspan></text></svg></h1>
+      <p class="tag" id="tag">User-friendly оболочка для станций</p>
+    </div>
+    <ol class="steps" id="steps"></ol>
+    <div class="ver" id="ver"></div>
+  </aside>
+  <section class="pane">
+    <header class="phead"><h2 id="title"></h2><p id="sub"></p></header>
+    <div class="body" id="body"></div>
+    <footer class="foot">
+      <button class="btn ghost" id="back">Назад</button>
+      <span class="spacer"></span>
+      <button class="btn primary" id="next">Далее</button>
+    </footer>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>

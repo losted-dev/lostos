@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.env
+*.pem
+secrets.enc
+accounts.db
+voices.json
+settings.json
+*.log
+build/
+venv/
+node_modules/
+data/
+keys/
+*.exe
+lostos-install-*

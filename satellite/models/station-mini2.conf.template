@@ -1,0 +1,30 @@
+# lostOS profile for the Yandex Station Mini 2 ("yandex,station-mini2"): A TEMPLATE, NOT TESTED. Copy it to the speaker as
+# /data/lostos/models/station-mini2.conf and fix every line marked TODO from what your own speaker shows (docs/models.md says how).
+# The values below are those of the Mini 3 (same Amlogic AXG family); the VQE preset name is the one libyandex_evil.so knows.
+codename=station-mini2
+host_prefix=yandex-mini2-
+friendly_name=Яндекс Станция Мини 2
+model_name=Yandex Station Mini 2
+# TODO: arecord -l / cat /etc/asound.conf / quasar.cfg audioInput: the capture PCM, rate and the channel layout
+capture_pcm=default
+capture_rate=48000
+capture_channels=4
+mic_channels=0,1,2
+spk_channels=3
+vqe_preset=yandexmini_2
+# TODO: ls /sys/class/leds (the prefix before the first colon) and cat /sys/class/graphics/fb*/name for the ring
+led_prefix=station-mini2
+ring=6,0,/dev/fb0,logo,ledfb-logo,logo
+# TODO: ls /sys/class/leds | grep clock (the clock LEDs of the display)
+clock_dir=/sys/class/leds/station-mini2:white:clock
+clock_seg_base=A
+clock_pos_base=0
+clock_colon=DH,DL
+clock_aux=DM,DEGREE
+clock_chip_current=0
+# TODO: cat /proc/bus/input/devices (the names of the touch keys and of the mute switch)
+keys_input=aw933xx
+mute_input=gpio-keys
+error_sound=ru-RU/playback_error.mp3
+# TODO: quasar.cfg volume_capability.volume_manager_settings.platformToAlsaMap
+volume_map=0:0,1:33,20:255
