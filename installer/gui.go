@@ -216,7 +216,7 @@ func runGUI() int {
 		if from < 0 || from > len(g.lines) {
 			from = 0
 		}
-		return map[string]any{"lines": g.lines[from:], "next": len(g.lines), "busy": g.busy, "done": g.done, "ok": g.ok, "result": g.result}, 200
+		return map[string]any{"lines": append([]string{}, g.lines[from:]...), "next": len(g.lines), "busy": g.busy, "done": g.done, "ok": g.ok, "result": g.result}, 200
 	})
 	api("link", func(r *http.Request) (any, int) {
 		var req struct {

@@ -204,8 +204,9 @@ async function startInstall() {
   if (!r.ok) { S.installing = false; $("#imsg").className = "msg bad"; $("#imsg").textContent = r.error || "Не получилось начать"; return; }
   for (;;) {
     await sleep(700);
-    const j = await api("job", { from: logFrom });
-    logLines.push(...j.lines); logFrom = j.next; drawLog();
+    let j;
+    try { j = await api("job", { from: logFrom }); } catch (e) { continue; }          // one lost request must not stop the log for good
+    logLines.push(...(j.lines || [])); logFrom = j.next; drawLog();
     if (j.done) {
       S.installing = false; S.installOk = j.ok;
       const m = $("#imsg");
