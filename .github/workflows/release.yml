@@ -26,6 +26,7 @@ jobs:
         run: |
           find satellite -name '*.sh' -exec chmod +x {} +
           chmod +x satellite/third_party/toolchain/*
+          git config core.fileMode false        # the permission change must not make the version of the release say "-dirty": the speakers compare it with what the file reports
       - name: Build the daemon (armhf, aarch64)
         run: |
           # one architecture after the other: both fetch the same third-party sources and a parallel run makes them delete each other's checkout

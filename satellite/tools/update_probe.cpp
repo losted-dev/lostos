@@ -4,7 +4,7 @@
 //        update_probe get <https_url>
 //          status, size and sha256 of the body (redirects followed)
 //        update_probe check [owner/repo]
-//          latest stable release as the daemon sees it (default Morvex885/pulsar)
+//          latest stable release as the daemon sees it (default losted-dev/lostos)
 //        update_probe install <version> <bin_url> <sums_url> <binary>
 //          downloads, verifies and swaps <binary> (keeps <binary dir>/pulsar.prev), as the daemon
 //          does for a release named <version>
@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
   Loop loop;
   int rc = 1;
   if (cmd == "check" && argc <= 3) {
-    Updater up(loop, argc == 3 ? argv[2] : "Morvex885/pulsar", "probe");
+    Updater up(loop, argc == 3 ? argv[2] : "losted-dev/lostos", "probe");
     up.check([&](const std::string &err, const Release &r) {
       if (err.empty()) {
         printf("version %s\nurl %s\nbin %s\nsums %s\n", r.version.c_str(), r.url.c_str(), r.bin_url.c_str(),
@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
     return rc;
   }
   if (cmd == "install" && argc == 6) {
-    Updater up(loop, "Morvex885/pulsar", "probe");
+    Updater up(loop, "losted-dev/lostos", "probe");
     Release r;
     r.version = argv[2];
     r.bin_url = argv[3];
