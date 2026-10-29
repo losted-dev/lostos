@@ -32,12 +32,15 @@ jobs:
           # one architecture after the other: both fetch the same third-party sources and a parallel run makes them delete each other's checkout
           make -C satellite armhf -j"$(nproc)"
           make -C satellite aarch64 -j"$(nproc)"
+      - name: Build the runtime of the JavaScript plugins (one static ARM program for every speaker)
+        run: sh satellite/plugin-runtime/build.sh satellite/build/plugin-runtime arm-linux-musleabihf
       - name: Files of the release
         run: |
           mkdir out
           cp satellite/build/armhf/lostos out/lostos-armhf.bin
           cp satellite/build/aarch64/lostos out/lostos-aarch64.bin
-          (cd out && sha256sum lostos-armhf.bin lostos-aarch64.bin > SHA256SUMS && cat SHA256SUMS)
+          cp satellite/build/plugin-runtime/lostos-js-arm-linux-musleabihf out/lostos-js-armhf.bin
+          (cd out && sha256sum lostos-armhf.bin lostos-aarch64.bin lostos-js-armhf.bin > SHA256SUMS && cat SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with: { name: firmware, path: out/ }
   installer:
@@ -66,7 +69,8 @@ jobs:
         with: { path: out, merge-multiple: true }
       - name: The files that the installer takes from the release (it is one file on its own)
         run: |
-          zip -qr out/lostos-payload.zip satellite/deploy satellite/models receivers
+          mkdir -p runtime && cp out/lostos-js-armhf.bin runtime/lostos-js
+          zip -qr out/lostos-payload.zip satellite/deploy satellite/models receivers runtime
           unzip -l out/lostos-payload.zip | tail -1
       - name: Draft release
         env:

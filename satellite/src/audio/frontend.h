@@ -1,7 +1,7 @@
 // Microphone front-end: ALSA capture (mic + speaker-feedback channels, layout per Model)
 // -> Yandex VQE (AEC / beamforming / noise reduction, per-model preset)
 // -> Yandex phrase spotters (stock models from /system/vendor/quasar/spotter_models):
-//    the wake word ("Алиса"/"Яндекс") and, optionally, the command model ("стоп", "громче", ...).
+//    the wake word ("Алиса"/"Яндекс"/"Yasmina") and, optionally, the command model ("стоп", "громче", ...).
 // Both engines come from the firmware's libyandex_evil.so (C API, loaded with dlopen).
 // Runs in its own thread; callbacks are delivered on the Loop thread.
 #pragma once

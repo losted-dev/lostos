@@ -73,6 +73,7 @@ class Controller : public ApiHooks {
   Controller(Loop &loop, const Model &model, SystemPlugins &sysplugins, const std::string &state_path);
   ~Controller() override;
   bool start();
+  void press_action_button();   // SIGUSR1: a short press of the Alice button (main.cpp)
 
   // ApiHooks
   void on_client_connected(const std::string &client_info) override;
@@ -341,6 +342,7 @@ class Controller : public ApiHooks {
   uint64_t press_timer_ = 0;
   std::string press_wav_;
   void press_begin(const std::string &code, const std::string &wav);
+  void button(Button b, Press p);
   void press_end();
   std::unique_ptr<SendspinService> sendspin_;
 };

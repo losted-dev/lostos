@@ -198,8 +198,17 @@ bool Controller::start() {
   id.project_version = LOSTOS_VERSION;
 
   ApiConfig cfg;
-  cfg.wake_words = {{"alisa", "Алиса", {"ru"}}, {"yandex", "Яндекс", {"ru"}}};
-  if (st_.wake_word != "alisa" && st_.wake_word != "yandex") st_.wake_word = "alisa";
+  // The wake words this station has a stock model for (spotter_models/activation/<id>). Alice and
+  // Yandex are on every station; Yasmina ships on some (seen on the Mini 3). Home Assistant lists
+  // the available ones, the user picks one, and the capture thread loads that model.
+  static const WakeWordInfo kWakeWords[] = {
+      {"alisa", "Алиса", {"ru"}}, {"yandex", "Яндекс", {"ru"}}, {"yasmina", "Yasmina", {"ar"}}};
+  cfg.wake_words.clear();
+  for (const auto &w : kWakeWords)
+    if (access(model_dir(w.id).c_str(), F_OK) == 0) cfg.wake_words.push_back(w);
+  if (cfg.wake_words.empty()) cfg.wake_words.push_back({"alisa", "Алиса", {"ru"}});
+  if (std::none_of(cfg.wake_words.begin(), cfg.wake_words.end(), [&](const WakeWordInfo &w) { return w.id == st_.wake_word; }))
+    st_.wake_word = cfg.wake_words.front().id;   // the saved word has no model on this station: fall back to the first available
   cfg.active_wake_words = {st_.wake_word};
   cfg.light_effects = Leds::effect_names();
   cfg.music_styles = Leds::music_styles();
@@ -235,6 +244,7 @@ bool Controller::start() {
                        Rgb{uint8_t(st_.light.r * 255), uint8_t(st_.light.g * 255), uint8_t(st_.light.b * 255)},
                        st_.light.brightness, st_.light.effect, 0);
 
+  mixer_.set_soft_output([this](float gain) { player_.set_master_gain(gain); });
   if (!mixer_.open()) LOGW("mixer unavailable");
   if (st_.has_volume) {
     // volume2= is authoritative
@@ -271,7 +281,7 @@ bool Controller::start() {
   }
   publish_update();
   loop_.add_timer(kUpdateFirstCheckMs, [this] { check_update(); }, kUpdateCheckPeriodMs);
-  if (!player_.init()) LOGE("player init failed");
+  if (!player_.init(model_.audio_sink)) LOGE("player init failed");
   // ANNOUNCING is reported only for HA announcements (on_announce / media announce), not for
   // earcons, timer alarms or pipeline TTS that share the ANNOUNCE playback channel.
   player_.on_state([this](Channel, PlayState) { publish_media(); });
@@ -325,55 +335,7 @@ bool Controller::start() {
       update_detection();
       update_ui();
     });
-    input_.on_button([this](Button b, Press p) {
-      if (b == Button::ACTION) LOGI("button: action %s, press_waiting=%d", p == Press::LONG ? "long" : "short", int(press_waiting_));
-      phost_.event("button", b == Button::ACTION ? (p == Press::LONG ? "action_long" : "action") : b == Button::VOLUME_UP ? "volume_up" : "volume_down");
-      if (b == Button::ACTION && press_waiting_ && p != Press::LONG) {   // the owner is connecting this station: this press is the proof that the speaker is in his hands
-        press_waiting_ = false;
-        clock_.clear_code();
-        link_.press_pressed();
-        player_.play(Channel::ANNOUNCE, {kSndWake});
-        return;
-      }
-      if (b == Button::ACTION) {
-        api_->fire_event(EventId::BUTTON, p == Press::LONG ? "action_long" : "action");
-        if (p == Press::LONG) return;  // exposed to HA automations only
-        if (sendspin_pairing_prompt_ && sendspin_) return sendspin_->confirm_pairing_window();
-        if (timer_ringing_) return stop_timer_ring();
-        if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING) {
-          interrupt_speech();  // an announcement playing over the dialog goes with it
-          play_closing_earcon(kSndCancel);
-          return finish_interaction();
-        }
-        if (phase_ == Phase::SPEAKING || announcing_) {
-          interrupt_speech();
-          return finish_interaction();
-        }
-        if (phase_ == Phase::IDLE) {  // a second tap within a moment starts Spotify; a single one acts after the wait
-          if (button_claimed_) {   // a plugin took the button: it gets the event above and decides what a tap does ...
-            if (!music_mode()) return;
-            LOGI("centre button: a plugin holds it, but music is playing: the tap works as pause / play");   // ... except while music plays: it is always pause / play
-          }
-          if (tap_timer_) {
-            loop_.cancel_timer(tap_timer_);
-            tap_timer_ = 0;
-            last_music_ms_ = Loop::now_ms();
-            LOGI("double tap: Spotify");
-            api_->fire_event(EventId::BUTTON, spotify_play_event(true));
-            return;
-          }
-          tap_timer_ = loop_.add_timer(350, [this] {
-            tap_timer_ = 0;
-            centre_single_tap();
-          });
-          return;
-        }
-        if (st_.alice_button) start_pipeline("", true);
-      } else {
-        api_->fire_event(EventId::BUTTON, b == Button::VOLUME_UP ? "volume_up" : "volume_down");
-        set_volume(st_.volume + (b == Button::VOLUME_UP ? 0.05f : -0.05f), true);
-      }
-    });
+    input_.on_button([this](Button b, Press p) { button(b, p); });
   } else {
     LOGW("input devices unavailable");
   }
@@ -474,6 +436,11 @@ bool Controller::start() {
   phost_.button_claim = [this](bool claimed) { button_claimed_ = claimed; LOGI("centre button %s by a plugin", claimed ? "claimed" : "released"); };
   phost_.publish = [this](const std::string &topic, const std::string &text) { api_->fire_event(EventId::BUTTON, "plugin " + topic + " " + text); };
   phost_.audio_state = [this](bool playing) { hub_.report(MediaSource::PLUGIN, playing, Loop::now_ms()); };
+  phost_.play_url = [this](const std::string &url, const std::string &) {   // as media from Home Assistant: the music channel, Sendspin steps aside
+    if (sendspin_) sendspin_->yield_to_local();
+    player_.play(Channel::MUSIC, {url});
+  };
+  phost_.stop_url = [this] { player_.stop(Channel::MUSIC); };
   phost_.state_changed = [this](const std::string &) { publish_plugins(); };
   phost_.start();
   link_.on_press = [this](const std::string &code, const std::string &wav) { loop_.post([this, code, wav] { press_begin(code, wav); }); };
@@ -1278,6 +1245,64 @@ void Controller::alarm_fetch(const std::string &id, const std::string &url) {
   waitpid(pid, nullptr, 0);
 }
 
+// A button of the speaker (input.cpp), or the Alice button pressed by SIGUSR1 (press_action_button).
+void Controller::button(Button b, Press p) {
+  if (b == Button::ACTION) LOGI("button: action %s, press_waiting=%d", p == Press::LONG ? "long" : "short", int(press_waiting_));
+  phost_.event("button", b == Button::ACTION ? (p == Press::LONG ? "action_long" : "action") : b == Button::VOLUME_UP ? "volume_up" : "volume_down");
+  if (b == Button::ACTION && press_waiting_ && p != Press::LONG) {   // the owner is connecting this station: this press is the proof that the speaker is in his hands
+    press_waiting_ = false;
+    clock_.clear_code();
+    link_.press_pressed();
+    player_.play(Channel::ANNOUNCE, {kSndWake});
+    return;
+  }
+  if (b == Button::ACTION) {
+    api_->fire_event(EventId::BUTTON, p == Press::LONG ? "action_long" : "action");
+    if (p == Press::LONG) return;  // exposed to HA automations only
+    if (sendspin_pairing_prompt_ && sendspin_) return sendspin_->confirm_pairing_window();
+    if (timer_ringing_) return stop_timer_ring();
+    if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING) {
+      interrupt_speech();  // an announcement playing over the dialog goes with it
+      play_closing_earcon(kSndCancel);
+      return finish_interaction();
+    }
+    if (phase_ == Phase::SPEAKING || announcing_) {
+      interrupt_speech();
+      return finish_interaction();
+    }
+    if (phase_ == Phase::IDLE) {  // a second tap within a moment starts Spotify; a single one acts after the wait
+      if (button_claimed_) {   // a plugin took the button: it gets the event above and decides what a tap does ...
+        if (!music_mode()) return;
+        LOGI("centre button: a plugin holds it, but music is playing: the tap works as pause / play");   // ... except while music plays: it is always pause / play
+      }
+      if (tap_timer_) {
+        loop_.cancel_timer(tap_timer_);
+        tap_timer_ = 0;
+        last_music_ms_ = Loop::now_ms();
+        LOGI("double tap: Spotify");
+        api_->fire_event(EventId::BUTTON, spotify_play_event(true));
+        return;
+      }
+      tap_timer_ = loop_.add_timer(350, [this] {
+        tap_timer_ = 0;
+        centre_single_tap();
+      });
+      return;
+    }
+    if (st_.alice_button) start_pipeline("", true);
+  } else {
+    api_->fire_event(EventId::BUTTON, b == Button::VOLUME_UP ? "volume_up" : "volume_down");
+    set_volume(st_.volume + (b == Button::VOLUME_UP ? 0.05f : -0.05f), true);
+  }
+}
+
+// SIGUSR1 to the daemon (root on the speaker only): a short press of the Alice button, through the same path as the real one.
+// Used where nobody stands at the speaker, e.g. to confirm the station on the server.
+void Controller::press_action_button() {
+  LOGI("button: Alice button pressed by SIGUSR1");
+  button(Button::ACTION, Press::SHORT);
+}
+
 // The owner confirmed this station on his server: show the first letters of its id on the clock, say the line, wait for the Alice button.
 void Controller::press_begin(const std::string &code, const std::string &wav) {
   press_waiting_ = true;
@@ -1566,7 +1591,11 @@ void Controller::set_volume(float v, bool feedback) {
     const int64_t now = Loop::now_ms();
     if (st_.volume_sound && !announcing_ && phase_ == Phase::IDLE && now - last_click_ms_ > 250) {   // a click on every step (not in the middle of a dialog)
       last_click_ms_ = now;
-      player_.play(Channel::ANNOUNCE, {std::string(kSounds) + "common/volume_sound.mp3"});   // the stock click of the Station
+      // the stock click of the Station; Station 1 has volume_change.wav instead
+      static const std::string click = access((std::string(kSounds) + "common/volume_sound.mp3").c_str(), R_OK) == 0
+                                           ? std::string(kSounds) + "common/volume_sound.mp3"
+                                           : std::string(kSounds) + "common/volume_change.wav";
+      player_.play(Channel::ANNOUNCE, {click});
     }
   }
   if (sendspin_) sendspin_->report_volume(st_.volume, st_.muted);

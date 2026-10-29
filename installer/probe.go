@@ -76,7 +76,16 @@ func probe(s string, ours bool) {
 	}
 	compat, err := sh(s, `tr '\0' ' ' </proc/device-tree/compatible`)
 	if err != nil {
-		skip("adb not usable (unauthorized or offline)")
+		switch adbState(s) {
+		case "unauthorized":
+			skip("adb refuses this computer (unauthorized): the speaker has to accept its key; a speaker with open root adb accepts any computer, so this one is not the usual rooted case")
+		case "offline":
+			skip("adb is offline: run `adb disconnect " + s + "`, then this installer again")
+		case "device":
+			skip("adb works, but this speaker has no /proc/device-tree/compatible: it is not a Yandex Station of the supported kind (an Android speaker, for example)")
+		default:
+			skip("no answer from adb at " + s + ": is the address right and is adb over the network on?")
+		}
 		return
 	}
 	m := codename.FindStringSubmatch(compat)

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // adbExe is the name of the adb program on this system.
@@ -82,7 +83,38 @@ func pull(s, remote, local string) error {
 	return c.Run()
 }
 
-func connect(s string)    { _ = adbCmd("connect", s).Run() }
+// connect: adb connect, then waits until the device is really there. Right after the adb server was started (the first run on a computer) a speaker stays "offline" for a second or two,
+// and the first command used to fail at once with "unauthorized or offline". -> the state that was seen last: "device", "offline", "unauthorized" or "" (not found).
+func connect(s string) string {
+	_ = adbCmd("connect", s).Run()
+	state := ""
+	for i := 0; i < 16; i++ {
+		state = adbState(s)
+		if state == "device" || state == "unauthorized" {
+			return state
+		}
+		if i == 6 && state == "" { // still not found after 3 s: connect once more
+			_ = adbCmd("connect", s).Run()
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return state
+}
+
+// adbState is what adb says about the device: "device", "offline", "unauthorized" or "" (anything else, for example not found).
+func adbState(s string) string {
+	b, _ := adbCmd("-s", s, "get-state").CombinedOutput()
+	t := strings.ToLower(strings.TrimSpace(string(b)))
+	switch {
+	case t == "device":
+		return "device"
+	case strings.Contains(t, "unauthorized"):
+		return "unauthorized"
+	case strings.Contains(t, "offline"):
+		return "offline"
+	}
+	return ""
+}
 func disconnect(s string) { _ = adbCmd("disconnect", s).Run() }
 
 var networkSerial = regexp.MustCompile(`:[0-9]+$`)

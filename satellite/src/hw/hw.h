@@ -146,7 +146,9 @@ class Input {
   using SwipeCb = std::function<void(bool forward)>;  // a swipe over the touch pads: true = from volume-down towards volume-up
   Input(Loop &loop, const Model &model);
   ~Input();
-  bool open();  // evdev: Model::keys_input (touch keys), Model::mute_input (mic mute switch)
+  // evdev: Model::keys_input (touch keys), Model::mute_input (mic mute switch); sysfs GPIOs:
+  // Model::action_gpio, mute_gpio, wheel_gpio (Station 1)
+  bool open();
   bool hw_muted() const;
   void on_button(ButtonCb cb);
   void on_mute(MuteCb cb);

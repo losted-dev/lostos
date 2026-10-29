@@ -23,6 +23,14 @@
 //     audio.close                        audio.play
 //     button claim | button release      assistant.intercept (while claimed, a tap of the centre button does nothing by itself: the plugin
 //                                         gets the "button" events and decides; stopping a timer and cancelling a dialog still work)
+//     http <json>                        network.connect  ({"method","url","headers":{},"body"}: the firmware makes the HTTP(S) request with its own
+//                                         TLS; result {"status","type","body"}, the body up to 256 KB; the speaker's own addresses are refused)
+//     play <json> / stop                 audio.play       ({"url","title"}: a stream or a file the music player of the speaker plays / stops)
+//     tool <json>                        assistant.tools  (a command for the voice assistant: {"name","description","parameters": JSON schema})
+//     toolresult <json>                  assistant.tools  ({"id","result"}: the answer to "! tool {"id","name","args"}")
+// JavaScript plugins (plugin-runtime/): the folder holds main.js and the program is /data/lostos/lostos-js, the runtime shared by all of them;
+// the script goes to it as the first message, "! script <bytes>\n" and the bytes (the sandbox cannot open files).
+// The commands of the plugins and the answers to their calls are in status() for the server ("id\ttool\t<json>", "id\tresult\t<call id>\t<json string>").
 // A plugin cannot create a socket itself (the sandbox forbids it): it gets only sockets the firmware opened for it, and the firmware
 // refuses addresses that belong to the speaker itself (loopback, its own addresses: adb, the API, the other plugins) and the speaker's own ports.
 // A call without the permission is answered with "err permission" and counted; three of them stop the plugin.
@@ -52,10 +60,13 @@ class PluginHost {
   std::function<void(const std::string &topic, const std::string &text)> publish;
   std::function<void(bool claimed)> button_claim;                  // a plugin took / gave back the centre button (the Alice button)
   std::function<void(bool playing)> audio_state;                  // a plugin started / stopped playing sound (a source of the media hub)
+  std::function<void(const std::string &url, const std::string &title)> play_url;   // a plugin asks the music player to play a stream
+  std::function<void()> stop_url;
   std::function<void(const std::string &line)> state_changed;   // a one-line status for the panel ("id\tstate\tdetail")
 
   void start();                                                    // starts the plugins that are switched on
-  // "install <id> <url> <sha256> <permissions> [<download base>]", "remove <id>", "enable <id> <permissions>", "disable <id>", "list": from the voice server
+  // "install <id> <url> <sha256> <permissions> [<download base> [js]]", "remove <id>", "enable <id> <permissions>", "disable <id>",
+  // "call <id> <call id> <base64 of {"name","args"}>" (a command of the plugin, for the voice assistant): from the voice server
   void command(const std::string &line);
   void event(const std::string &name, const std::string &data);    // to the plugins that subscribed
   void audio_stop();                                               // another source took the speaker: the sound of the plugins stops
@@ -79,7 +90,17 @@ class PluginHost {
     std::map<std::string, std::string> kv;
     bool claims_button = false;                                   // this plugin holds the centre button
     pid_t aplay = -1;                                             // the player of the sound this plugin sends
+    bool js = false;                                              // a JavaScript plugin: main.js in its folder, the shared runtime as its program
+    unsigned gen = 0;                                             // counts the starts: an HTTP answer for an earlier run is dropped
+    int http_busy = 0;                                            // its requests in flight
+    std::map<std::string, std::string> tools;                     // name -> declaration (json)
+    bool plays = false;                                           // the music player plays what this plugin asked for
   };
+  struct Result {
+    std::string plugin, id, json;
+    int64_t at = 0;
+  };
+  std::vector<Result> results_;                                   // answers to the server's calls, kept in status() for a while
   Loop &loop_;
   SystemPlugins &system_;   // the plugins of the system itself (AirPlay, Spotify): not in the sandbox, listed and switched with the others
   std::map<std::string, Plugin> plugins_;
@@ -96,8 +117,11 @@ class PluginHost {
   void stopped(Plugin &p);
   void halt(Plugin &p);
   bool allowed(const Plugin &p, const std::string &perm) const;
-  void install(const std::string &id, const std::string &url, const std::string &sha, const std::string &perms, const std::string &dl);
+  void install(const std::string &id, const std::string &url, const std::string &sha, const std::string &perms, const std::string &dl, bool js = false);
   void trust(Plugin &p);                                           // checks the signature of the package here (trust.h) and sets what the plugin is granted
+  void http(Plugin &p, const std::string &n, const std::string &args);
+  void call(const std::string &id, const std::string &call_id, const std::string &b64);
+  bool send_script(Plugin &p);
   std::vector<std::string> allowed_for(const Plugin &p, const std::vector<std::string> &asked) const;   // what the speaker grants of what the server asks
 };
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# lostos control: enable | disable | restart | reload | status | log | api-key
+# lostos control: enable | disable | restart | reload | status | log | api-key | press
 #   enable  - stop the Yandex stack, run lostos now and on every boot
 #   disable - stop lostos, start the Yandex stack again (also after reboot)
 #   reload  - restart the supervisor and the daemon (after supervise.sh was replaced); never starts
@@ -9,8 +9,15 @@
 #             recent Home Assistant (mid-2026+) provisions a key automatically over the API on first
 #             connect; setting or clearing a different key by hand makes HA ask to re-authenticate.
 #             A corrupt file makes the daemon fail closed, hence the validation below.
+#   press   - the Alice button, pressed from here (SIGUSR1 to the daemon), e.g. to confirm the station on the server
+#             when nobody stands at it
 D=${LOSTOS_DIR:-/data/lostos}
 Q=${LOSTOS_Q:-/system/vendor/quasar/q}
+# Station 1 (Android): the busybox tools boot-android.sh links into $D/bin (killall, which `q stop` needs)
+if [ -d "$D/bin" ]; then
+  PATH="$D/bin:$PATH" ANDROID_DATA=${ANDROID_DATA:-/data} ANDROID_ROOT=${ANDROID_ROOT:-/system}
+  export PATH ANDROID_DATA ANDROID_ROOT
+fi
 
 # SIGTERM, wait up to 10 s for the process to go, then SIGKILL. Returns 1 if it is still there.
 stop_daemon() {
@@ -123,6 +130,11 @@ case "$1" in
   log)
     tail -n "${2:-50}" /tmp/lostos.log
     ;;
+  press)
+    p=$(pidof lostos)
+    [ -n "$p" ] || { echo "lostos is not running" >&2; exit 1; }
+    kill -USR1 $p && echo "Alice button pressed"
+    ;;
   api-key)
     case "${2-}" in
       "")
@@ -145,7 +157,7 @@ case "$1" in
     esac
     ;;
   *)
-    echo "usage: $0 enable|disable|restart|reload|status|log [lines]|api-key [base64|clear]"
+    echo "usage: $0 enable|disable|restart|reload|status|log [lines]|api-key [base64|clear]|press"
     exit 1
     ;;
 esac

@@ -43,8 +43,9 @@
    "code": "station-midi",
    "name": "Yandex Station 2",
    "arch": "armhf",
-   "status": "preparing",
-   "note": "the lighting (a matrix of 84 points on top, a pixel display in front) needs a profile from a real speaker"
+   "status": "untested",
+   "profile": "station-midi.conf",
+   "sha256": "be2a676a7f8e76d1c16f77eb5f24ca6bbef7c5f699109c8bafed81991ce4fc29"
   }
  ]
 }

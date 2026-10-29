@@ -51,7 +51,7 @@ var catalog = map[string]modelInfo{
 	"bergamot":      {Code: "bergamot", Name: "Yandex Station Mini 3", Arch: "armhf", Builtin: true, Status: "verified"},
 	"station-micro": {Code: "station-micro", Name: "Yandex Station Lite (Micro)", Arch: "armhf", Status: "untested"},
 	"station-mini2": {Code: "station-mini2", Name: "Yandex Station Mini 2", Arch: "armhf", Status: "untested"},
-	"station-midi":  {Code: "station-midi", Name: "Yandex Station 2", Arch: "armhf", Status: "preparing", Note: "the lighting and the display need a profile from a real speaker"},
+	"station-midi":  {Code: "station-midi", Name: "Yandex Station 2", Arch: "armhf", Status: "preparing", Note: "the top light panel needs a LED type and a profile from a real speaker (the model has no screen and no clock)"},
 }
 
 var catalogBase string // where a profile of the network catalog is fetched from ("" = only the package)

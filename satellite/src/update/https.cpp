@@ -15,11 +15,15 @@
 #include <mutex>
 
 #include "core/log.h"
+#include "monocypher-ed25519.h"
+#include "monocypher.h"
 
 namespace cs {
 namespace {
 
-constexpr const char *kCaBundle = "/etc/ssl/certs/ca-certificates.crt";
+// The CA bundle of the firmware: Buildroot stations keep it in /etc/ssl; Station 1 (Android) has none
+// there, the Yandex stack brings its own.
+constexpr const char *kCaBundles[] = {"/etc/ssl/certs/ca-certificates.crt", "/system/vendor/quasar/ca-certificates.crt"};
 constexpr int kConnectTimeoutMs = 10000;
 constexpr int kIoTimeoutS = 20;
 // OpenSSL constants, identical in 1.1 and 3.
@@ -74,6 +78,16 @@ struct Ssl {
   void *ctx = nullptr;  // shared, configured once (SSL_CTX is thread-safe once set up)
 };
 
+}  // namespace
+
+const char *ca_bundle() {
+  for (const char *p : kCaBundles)
+    if (access(p, R_OK) == 0) return p;
+  return kCaBundles[0];
+}
+
+namespace {
+
 template <typename T>
 bool sym(void *h, const char *name, T &out, std::string &missing) {
   out = reinterpret_cast<T>(dlsym(h, name));
@@ -89,7 +103,8 @@ const Ssl &ssl() {
     for (const char *lib : {"libssl.so.3", "libssl.so.1.1", "libssl.so"})
       if ((h = dlopen(lib, RTLD_NOW | RTLD_LOCAL))) break;
     if (!h) {
-      s.error = std::string("no libssl: ") + dlerror();
+      const char *e = dlerror();
+      s.error = std::string("no libssl: ") + (e ? e : "not found");
       return;
     }
     std::string m;
@@ -129,8 +144,8 @@ const Ssl &ssl() {
     }
     s.SSL_CTX_ctrl(s.ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, TLS1_2_VERSION, nullptr);
     s.SSL_CTX_set_verify(s.ctx, SSL_VERIFY_PEER, nullptr);
-    if (s.SSL_CTX_load_verify_locations(s.ctx, kCaBundle, nullptr) != 1) {
-      s.error = std::string("cannot load ") + kCaBundle;
+    if (s.SSL_CTX_load_verify_locations(s.ctx, ca_bundle(), nullptr) != 1) {
+      s.error = std::string("cannot load ") + ca_bundle();
       return;
     }
     s.ok = true;
@@ -182,12 +197,21 @@ int tcp_connect(const std::string &host, const std::string &port, std::string &e
 
 struct Url {
   std::string host, port = "443", path = "/";
+  bool tls = true;
 };
 
 bool parse_url(const std::string &url, Url &u) {
-  const std::string scheme = "https://";
-  if (url.compare(0, scheme.size(), scheme) != 0) return false;
-  std::string rest = url.substr(scheme.size());
+  const std::string scheme = "https://", plain = "http://";
+  std::string rest;
+  if (url.compare(0, scheme.size(), scheme) == 0) {
+    rest = url.substr(scheme.size());
+  } else if (url.compare(0, plain.size(), plain) == 0) {
+    rest = url.substr(plain.size());
+    u.tls = false;
+    u.port = "80";
+  } else {
+    return false;
+  }
   size_t slash = rest.find('/');
   std::string hostport = rest.substr(0, slash);
   if (slash != std::string::npos) u.path = rest.substr(slash);
@@ -211,6 +235,7 @@ class Conn {
   bool open(const Url &u, std::string &err) {
     fd_ = tcp_connect(u.host, u.port, err);
     if (fd_ < 0) return false;
+    if (!u.tls) return true;                                          // plain http: the socket itself
     s_.ERR_clear_error();
     ssl_ = s_.SSL_new(s_.ctx);
     if (!ssl_) return err = ssl_error(s_, "SSL_new"), false;
@@ -228,7 +253,7 @@ class Conn {
   bool write_all(const std::string &d) {
     size_t off = 0;
     while (off < d.size()) {
-      int n = s_.SSL_write(ssl_, d.data() + off, int(d.size() - off));
+      int n = ssl_ ? s_.SSL_write(ssl_, d.data() + off, int(d.size() - off)) : int(::write(fd_, d.data() + off, d.size() - off));
       if (n <= 0) return false;
       off += size_t(n);
     }
@@ -238,6 +263,15 @@ class Conn {
   bool fill(std::string &err) {
     char tmp[16384];
     errno = 0;
+    if (!ssl_) {
+      const ssize_t n = ::read(fd_, tmp, sizeof tmp);
+      if (n > 0) {
+        buf_.append(tmp, size_t(n));
+        return true;
+      }
+      if (n < 0) err = std::string("read: ") + strerror(errno);
+      return false;
+    }
     int n = s_.SSL_read(ssl_, tmp, sizeof tmp);
     if (n > 0) {
       buf_.append(tmp, size_t(n));
@@ -399,11 +433,26 @@ void tls_close(TlsSock &t) {
   t.fd = -1;
 }
 
-bool ed25519_available() { return ssl().ok && ssl().ed; }
+// Ed25519 from the firmware's OpenSSL (1.1.1+), else Monocypher (Station 1 has OpenSSL 1.1.0e). Both are
+// RFC 8032 Ed25519: the same keys and signatures.
+bool ed25519_available() { return true; }
+
+namespace {
+void mono_secret(const uint8_t priv[32], uint8_t secret[64], uint8_t pub[32]) {
+  uint8_t seed[32];
+  memcpy(seed, priv, 32);  // crypto_ed25519_key_pair wipes the seed it is given
+  crypto_ed25519_key_pair(secret, pub, seed);
+}
+}  // namespace
 
 bool ed25519_pub(const uint8_t priv[32], uint8_t pub[32]) {
   const Ssl &s = ssl();
-  if (!ed25519_available()) return false;
+  if (!(s.ok && s.ed)) {
+    uint8_t secret[64];
+    mono_secret(priv, secret, pub);
+    crypto_wipe(secret, sizeof secret);
+    return true;
+  }
   void *k = s.EVP_PKEY_new_raw_private_key(kEd25519, nullptr, priv, 32);
   if (!k) return false;
   size_t len = 32;
@@ -414,7 +463,13 @@ bool ed25519_pub(const uint8_t priv[32], uint8_t pub[32]) {
 
 bool ed25519_sign(const uint8_t priv[32], const std::string &msg, uint8_t sig[64]) {
   const Ssl &s = ssl();
-  if (!ed25519_available()) return false;
+  if (!(s.ok && s.ed)) {
+    uint8_t secret[64], pub[32];
+    mono_secret(priv, secret, pub);
+    crypto_ed25519_sign(sig, secret, reinterpret_cast<const uint8_t *>(msg.data()), msg.size());
+    crypto_wipe(secret, sizeof secret);
+    return true;
+  }
   void *k = s.EVP_PKEY_new_raw_private_key(kEd25519, nullptr, priv, 32);
   if (!k) return false;
   void *ctx = s.EVP_MD_CTX_new();
@@ -428,7 +483,8 @@ bool ed25519_sign(const uint8_t priv[32], const std::string &msg, uint8_t sig[64
 
 bool ed25519_verify(const uint8_t pub[32], const std::string &msg, const uint8_t sig[64]) {
   const Ssl &s = ssl();
-  if (!s.ed_verify) return false;
+  if (!(s.ok && s.ed_verify))
+    return crypto_ed25519_check(sig, pub, reinterpret_cast<const uint8_t *>(msg.data()), msg.size()) == 0;
   void *k = s.EVP_PKEY_new_raw_public_key(kEd25519, nullptr, pub, 32);
   if (!k) return false;
   void *ctx = s.EVP_MD_CTX_new();
@@ -453,28 +509,30 @@ std::string sha256_hex(const std::string &data) {
   return out;
 }
 
-HttpsResponse https_get(const std::string &url_in, const std::vector<std::string> &headers, size_t max_bytes,
-                        const std::function<void(size_t, size_t)> &progress, const std::atomic<bool> *cancel,
-                        int max_redirects) {
+namespace {
+
+HttpsResponse request(std::string method, const std::string &url_in, const std::vector<std::string> &headers, std::string body, size_t max_bytes,
+                      const std::function<void(size_t, size_t)> &progress, const std::atomic<bool> *cancel, int max_redirects) {
   HttpsResponse r;
   const Ssl &s = ssl();
-  if (!s.ok) {
-    r.error = s.error;
-    return r;
-  }
   std::string url = url_in;
   for (int hop = 0;; hop++) {
     Url u;
     if (!parse_url(url, u)) {
-      r.error = "not an https URL: " + url;
+      r.error = "not an http(s) URL: " + url;
+      return r;
+    }
+    if (u.tls && !s.ok) {
+      r.error = s.error;
       return r;
     }
     errno = 0;
     Conn c(s);
     if (!c.open(u, r.error)) return r;
-    std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.host + "\r\nConnection: close\r\nAccept-Encoding: identity\r\n";
+    std::string req = method + " " + u.path + " HTTP/1.1\r\nHost: " + u.host + "\r\nConnection: close\r\nAccept-Encoding: identity\r\n";
     for (const auto &h : headers) req += h + "\r\n";
-    req += "\r\n";
+    if (!body.empty() || method == "POST" || method == "PUT" || method == "PATCH") req += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    req += "\r\n" + body;
     if (!c.write_all(req)) {
       r.error = ssl_error(s, "write");
       return r;
@@ -508,11 +566,13 @@ HttpsResponse https_get(const std::string &url_in, const std::vector<std::string
       if (name == "location") location = value;
       else if (name == "content-length") length = atoll(value.c_str());
       else if (name == "transfer-encoding") chunked = lower(value).find("chunked") != std::string::npos;
+      else if (name == "content-type") r.content_type = value;
     }
     if (status >= 300 && status < 400 && !location.empty()) {
-      if (location[0] == '/') location = "https://" + u.host + (u.port == "443" ? "" : ":" + u.port) + location;
+      if (location[0] == '/') location = std::string(u.tls ? "https://" : "http://") + u.host + (u.port == (u.tls ? "443" : "80") ? "" : ":" + u.port) + location;
       if (hop < max_redirects) {
         url = location;
+        if (status != 307 && status != 308) method = "GET", body.clear();
         continue;
       }
       r.location = location;
@@ -524,6 +584,23 @@ HttpsResponse https_get(const std::string &url_in, const std::vector<std::string
     }
     return r;
   }
+}
+
+}  // namespace
+
+HttpsResponse https_get(const std::string &url, const std::vector<std::string> &headers, size_t max_bytes,
+                        const std::function<void(size_t, size_t)> &progress, const std::atomic<bool> *cancel, int max_redirects) {
+  if (url.rfind("https://", 0) != 0) {                               // the updater and the link only ever go over TLS
+    HttpsResponse r;
+    r.error = "not an https URL: " + url;
+    return r;
+  }
+  return request("GET", url, headers, "", max_bytes, progress, cancel, max_redirects);
+}
+
+HttpsResponse https_request(const std::string &method, const std::string &url, const std::vector<std::string> &headers, const std::string &body,
+                            size_t max_bytes, int max_redirects) {
+  return request(method, url, headers, body, max_bytes, {}, nullptr, max_redirects);
 }
 
 }  // namespace cs

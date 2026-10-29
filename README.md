@@ -13,7 +13,7 @@ Not in this repository: the receivers (shairport-sync, librespot and their libra
 | Station Lite 2 (`plum`) | works (built in) |
 | Station Midi (`cucumber`) | built in, not tried on a real speaker |
 | Station Lite "Micro" (`station-micro`), Mini 2 (`station-mini2`) | profiles are made from firmware dumps, not tried |
-| Station 2 (`station-midi`) | in preparation (an LED matrix on top, a pixel display in front) |
+| Station 2 (`station-midi`) | profile and the light panel (84 dots) written from a probe of a real speaker, not tried with the daemon yet; no screen and no clock on this model |
 
 The list of models and their profiles is data (`satellite/models/catalog.json`, signed, and one `.conf` per model), so a new speaker is added by a file, not by changing the code: see `docs/models.md`.
 

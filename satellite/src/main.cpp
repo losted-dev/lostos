@@ -148,11 +148,17 @@ int main(int argc, char **argv) {
   sigemptyset(&mask);
   sigaddset(&mask, SIGINT);
   sigaddset(&mask, SIGTERM);
+  sigaddset(&mask, SIGUSR1);
   pthread_sigmask(SIG_BLOCK, &mask, nullptr);  // before any thread starts: workers inherit the mask
   int sfd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
+  cs::Controller *ctlp = nullptr;
   loop.add_fd(sfd, 0x001 /* EPOLLIN */, [&](uint32_t) {
     signalfd_siginfo si;
     while (read(sfd, &si, sizeof si) == sizeof si) {
+      if (si.ssi_signo == SIGUSR1) {   // `kill -USR1 <pid>` (ctl.sh press): the Alice button, from root on the speaker
+        if (ctlp) ctlp->press_action_button();
+        continue;
+      }
       LOGI("signal %u, exiting", si.ssi_signo);
       loop.stop();
     }
@@ -162,6 +168,7 @@ int main(int argc, char **argv) {
   cs::SystemPlugins sysplugins(loop, *model);
   sysplugins.start_audio();
   cs::Controller ctl(loop, *model, sysplugins, state);
+  ctlp = &ctl;
   if (!ctl.start()) {
     arm_teardown_watchdog(1);
     return 1;

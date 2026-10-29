@@ -84,6 +84,14 @@ const unsigned kAllowed[] = {
     369,  // prlimit64 (musl's getrlimit)
     338,  // set_robust_list
     384,  // getrandom
+    // the 64-bit-time twins of calls above: musl 1.2 (zig's) uses them first on 32-bit ARM and only falls back on ENOSYS, which a
+    // seccomp kill never gives (seen with the JavaScript runtime: clock_gettime64 killed it at its first call)
+    403,  // clock_gettime64
+    406,  // clock_getres_time64
+    407,  // clock_nanosleep_time64
+    413,  // pselect6_time64
+    414,  // ppoll_time64
+    422,  // futex_time64
     983045,  // ARM_NR_set_tls (0xf0005): the thread pointer of a static musl program
 };
 

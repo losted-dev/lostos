@@ -27,10 +27,13 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <thread>
 
 #include "core/log.h"
+#include "update/tls.h"
 
 namespace cs {
 
@@ -116,7 +119,6 @@ int soup_status(const char *dbg) {
   return atoi(q);
 }
 
-constexpr const char *kCaBundle = "/etc/ssl/certs/ca-certificates.crt";
 
 // alsa-lib diagnostics (alsasink's IEC958 probe "Unknown PCM speakers:{AES0 ...}", "Cannot read
 // Channel Map ctl") are noise on this device; real failures surface as GStreamer errors.
@@ -143,6 +145,8 @@ struct Api {
   void (*g_error_free)(gp err);
   void (*g_free)(gp p);
   uint32_t (*g_quark_try_string)(const char *s);  // optional, like the two below: retry/resume only
+  unsigned long (*g_signal_connect_data)(gp instance, const char *signal, gp handler, gp data, gp destroy, int flags);   // optional: ICY off
+  gp (*g_object_class_find_property)(gp klass, const char *name);
   // gstreamer
   int (*gst_init_check)(int *argc, char ***argv, gp *err);
   gp (*gst_parse_launch)(const char *desc, gp *err);
@@ -193,6 +197,8 @@ bool load_api(void *&glib, void *&gst) {
   ok &= sym(glib, "g_error_free", g.g_error_free);
   ok &= sym(glib, "g_free", g.g_free);
   g.g_quark_try_string = reinterpret_cast<decltype(g.g_quark_try_string)>(dlsym(glib, "g_quark_try_string"));
+  g.g_signal_connect_data = reinterpret_cast<decltype(g.g_signal_connect_data)>(dlsym(glib, "g_signal_connect_data"));
+  g.g_object_class_find_property = reinterpret_cast<decltype(g.g_object_class_find_property)>(dlsym(glib, "g_object_class_find_property"));
   g.gst_element_query_position =
       reinterpret_cast<decltype(g.gst_element_query_position)>(dlsym(gst, "gst_element_query_position"));
   g.gst_element_seek_simple = reinterpret_cast<decltype(g.gst_element_seek_simple)>(dlsym(gst, "gst_element_seek_simple"));
@@ -214,7 +220,7 @@ const char *const kPlugins[] = {"coreelements", "playback",    "typefindfunction
                                 "audiorate",    "volume",      "alsa_nocapturelog", "wavparse",     "ogg",
                                 "opus",         "opusparse",   "flac",              "audioparsers", "libav",
                                 "soup",         "isomp4",      "id3demux",          "app",          "gio",
-                                "autodetect",   "pbtypes",     "hls",               "mpegtsdemux"};
+                                "autodetect",   "pbtypes",     "hls",               "mpegtsdemux",  "opensles"};
 
 std::string to_uri(const std::string &u) {
   if (u.find("://") != std::string::npos) return u;
@@ -269,6 +275,7 @@ struct Player::Impl {
   std::thread thread;
   bool ok = false;
   Chan chans[2];
+  double master = 1.0;  // Mixer "soft" (Model::mixer): multiplies every channel gain
   std::mutex cb_mu;
   StateCb state_cb;
   std::mutex done_mu;
@@ -511,6 +518,14 @@ struct Player::Impl {
     }
   }
 
+  // souphttpsrc asks an internet radio for ICY metadata by default; the stream then comes as application/x-icy, which needs icydemux, and
+  // the firmware's GStreamer has none ("No decoder available for type application/x-icy", seen with radio-browser stations). Without the
+  // request the station sends the plain stream (MP3, AAC), which the firmware decodes.
+  static void on_source_setup(gp playbin, gp source, gp) {
+    gp klass = *static_cast<gp *>(source);                        // GTypeInstance.g_class
+    if (g.g_object_class_find_property(klass, "iradio-mode")) g.g_object_set(source, "iradio-mode", 0, nullptr);
+  }
+
   // Linear gain ramp (0.05 per 20 ms, full scale in 400 ms) to avoid clicks when ducking.
   static int ramp_tick(gp user) {
     auto &c = *static_cast<Chan *>(user);
@@ -521,7 +536,7 @@ struct Player::Impl {
     } else {
       c.gain_cur += d > 0 ? step : -step;
     }
-    g.g_object_set(c.pipe, "volume", c.gain_cur, nullptr);
+    g.g_object_set(c.pipe, "volume", c.gain_cur * c.impl->master, nullptr);
     if (c.gain_cur == c.gain_target) {
       c.ramp_src = 0;
       return 0;
@@ -552,12 +567,12 @@ Player::~Player() {
   }
 }
 
-bool Player::init() {
+bool Player::init(const std::string &sink) {
   auto &d = *impl_;
   if (d.ok) return true;
   if (!load_api(d.glib, d.gst)) return false;
   gp err = nullptr;
-  if (access(kCaBundle, R_OK) == 0) setenv("SSL_CERT_FILE", kCaBundle, 0);
+  if (access(ca_bundle(), R_OK) == 0) setenv("SSL_CERT_FILE", ca_bundle(), 0);
   // Process-global: alsa-lib messages go to the debug log (see alsa_error).
   snd_lib_error_set_handler(alsa_error);
   if (!g.gst_init_check(nullptr, nullptr, &err)) {
@@ -587,8 +602,8 @@ bool Player::init() {
     c.impl = &d;
     c.id = Channel(i);
     gp perr = nullptr;
-    char desc[160];
-    snprintf(desc, sizeof desc, "playbin name=ch%d audio-sink=\"%s\"", i, kSinkDesc);
+    char desc[512];
+    snprintf(desc, sizeof desc, "playbin name=ch%d audio-sink=\"%s\"", i, sink.empty() ? kSinkDesc : sink.c_str());
     c.pipe = g.gst_parse_launch(desc, &perr);
     if (!c.pipe) {
       LOGE("player: cannot create playbin: %s", gerror_message(perr));
@@ -599,7 +614,9 @@ bool Player::init() {
       g.g_error_free(perr);
     }
     g.g_object_set(c.pipe, "flags", kPlayFlags, nullptr);
-    g.g_object_set(c.pipe, "volume", 1.0, nullptr);
+    if (g.g_signal_connect_data && g.g_object_class_find_property)
+      g.g_signal_connect_data(c.pipe, "source-setup", reinterpret_cast<gp>(&Impl::on_source_setup), nullptr, nullptr, 0);
+    g.g_object_set(c.pipe, "volume", d.master, nullptr);
     if (c.id == Channel::ANNOUNCE) g.g_object_set(c.pipe, "buffer-duration", kAnnounceBufferNs, nullptr);
     gp bus = g.gst_pipeline_get_bus(c.pipe);
     g.gst_bus_add_watch(bus, &Impl::on_bus, &c);
@@ -679,10 +696,24 @@ void Player::set_channel_gain(Channel ch, float gain) {
       if (c.ramp_src) g.g_source_remove(c.ramp_src);
       c.ramp_src = 0;
       c.gain_cur = gn;
-      g.g_object_set(c.pipe, "volume", gn, nullptr);
+      g.g_object_set(c.pipe, "volume", gn * d->master, nullptr);
       return;
     }
     if (!c.ramp_src) c.ramp_src = g.g_timeout_add(20, &Impl::ramp_tick, &c);
+  });
+}
+
+void Player::set_master_gain(float gain) {
+  auto *d = impl_.get();
+  const double gn = std::min(1.0, std::max(0.0, double(gain)));
+  if (!d->ok) {  // before init(): taken over when the channels are created
+    d->master = gn;
+    return;
+  }
+  d->invoke([d, gn] {
+    d->master = gn;
+    for (auto &c : d->chans)
+      if (!c.ramp_src) g.g_object_set(c.pipe, "volume", c.gain_cur * gn, nullptr);  // a running ramp applies it next tick
   });
 }
 
@@ -712,6 +743,30 @@ int legacy_raw(float v) {
 float legacy_volume(int raw) {
   double db = -60.0 + 60.0 * raw / 255.0;
   return float(std::max(0.0, (std::pow(10.0, db / 60.0) - 0.1) / 0.9));
+}
+
+// The mixer API of the system libtinyalsa.so (Android; Station 1 has no alsa-lib configuration).
+struct TinyMixer {
+  void *(*open)(unsigned card) = nullptr;
+  void *(*by_name)(void *mixer, const char *name) = nullptr;
+  unsigned (*num_values)(void *ctl) = nullptr;
+  int (*get)(void *ctl, unsigned id) = nullptr;
+  int (*set)(void *ctl, unsigned id, int value) = nullptr;
+};
+
+const TinyMixer *tiny_mixer() {
+  static const TinyMixer *t = []() -> const TinyMixer * {
+    void *lib = dlopen("libtinyalsa.so", RTLD_NOW);
+    if (!lib) return nullptr;
+    static TinyMixer m;
+    m.open = reinterpret_cast<decltype(m.open)>(dlsym(lib, "mixer_open"));
+    m.by_name = reinterpret_cast<decltype(m.by_name)>(dlsym(lib, "mixer_get_ctl_by_name"));
+    m.num_values = reinterpret_cast<decltype(m.num_values)>(dlsym(lib, "mixer_ctl_get_num_values"));
+    m.get = reinterpret_cast<decltype(m.get)>(dlsym(lib, "mixer_ctl_get_value"));
+    m.set = reinterpret_cast<decltype(m.set)>(dlsym(lib, "mixer_ctl_set_value"));
+    return m.open && m.by_name && m.num_values && m.get && m.set ? &m : nullptr;
+  }();
+  return t;
 }
 
 bool find_master(snd_ctl_t *ctl) {
@@ -755,7 +810,51 @@ float Mixer::from_legacy(float v) const { return from_raw(legacy_raw(v)); }
 
 float Mixer::to_legacy(float v) const { return legacy_volume(to_raw(v)); }
 
+// The HAL sets these controls only when someone sets its hw_master_volume (maind) or when mediaserver
+// starts (85 %); with maind stopped they keep what it left until this mixer writes them.
+bool Mixer::open_hardvol() {
+  std::ifstream f(model_.hardvol_file);
+  const std::string xml((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  if (xml.empty()) {
+    LOGE("mixer: cannot read the volume table %s", model_.hardvol_file.c_str());
+    return false;
+  }
+  const std::string err = parse_hardvol(xml, hard_);
+  if (!err.empty()) {
+    LOGE("mixer: %s: %s", model_.hardvol_file.c_str(), err.c_str());
+    return false;
+  }
+  const TinyMixer *t = tiny_mixer();
+  void *mixer = t ? t->open(unsigned(model_.hardvol_card)) : nullptr;
+  if (!mixer) {
+    LOGE("mixer: cannot open the mixer of card %d through libtinyalsa.so", model_.hardvol_card);
+    hard_.clear();
+    return false;
+  }
+  for (const HardvolCtl &h : hard_) {
+    void *ctl = t->by_name(mixer, h.name.c_str());
+    if (!ctl) {
+      LOGE("mixer: card %d has no control '%s'", model_.hardvol_card, h.name.c_str());
+      hard_.clear();
+      hard_ctls_.clear();
+      return false;
+    }
+    hard_ctls_.push_back(ctl);
+  }
+  // Adopt the current level (what the stock stack left) through the first control's table.
+  const double pr = hard_[0].percent(t->get(hard_ctls_[0], 0));
+  if (pr > 0) volume_ = from_raw(int(std::lround(pr)));
+  LOGI("mixer: codec volume on card %d by the table %s (%zu controls), now %.1f %% -> volume %.2f", model_.hardvol_card,
+       model_.hardvol_file.c_str(), hard_.size(), pr, volume_);
+  return true;
+}
+
 bool Mixer::open() {
+  if (model_.mixer == "soft") {
+    LOGI("mixer: software volume in the player (no ALSA master control on this model)");
+    return true;
+  }
+  if (model_.mixer == "hardvol") return open_hardvol();
   snd_ctl_t *ctl = nullptr;
   int rc = snd_ctl_open(&ctl, "hw:0", 0);
   if (rc < 0) {
@@ -801,6 +900,26 @@ void Mixer::set_muted(bool m) {
 }
 
 void Mixer::apply() {
+  if (model_.mixer == "hardvol") {
+    const TinyMixer *t = tiny_mixer();
+    if (!t || hard_ctls_.empty()) return;
+    const int pr = muted_ ? 0 : to_raw(volume_);  // the HAL's percent; 0 = each control's mute value
+    for (size_t i = 0; i < hard_.size(); i++) {
+      const int v = hard_[i].value(pr);
+      for (unsigned k = 0; k < t->num_values(hard_ctls_[i]); k++)
+        if (t->set(hard_ctls_[i], k, v) < 0) LOGE("mixer: '%s' = %d failed", hard_[i].name.c_str(), v);
+    }
+    LOGD("mixer: volume %.2f muted=%d -> %d %%", volume_, int(muted_), pr);
+    return;
+  }
+  if (model_.mixer == "soft") {
+    // The raw value of the stock map read as the -60..0 dB of a softvol control; mute is silence.
+    const int raw = to_raw(volume_);
+    const float gain = muted_ ? 0.0f : float(std::pow(10.0, (-60.0 + 60.0 * raw / 255.0) / 20.0));
+    if (soft_out_) soft_out_(gain);
+    LOGD("mixer: volume %.2f muted=%d -> raw %d, gain %.4f", volume_, int(muted_), raw, gain);
+    return;
+  }
   auto *ctl = static_cast<snd_ctl_t *>(ctl_);
   if (!ctl) return;
   int raw = muted_ ? 0 : to_raw(volume_);

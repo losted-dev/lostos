@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -56,8 +57,26 @@ func checkServer(raw string) (serverInfo, error) {
 	return serverInfo{}, last
 }
 
+// serverClient: a redirect may not leave the address the person typed (another host, or https -> http).
+// From sorried, losted-dev/lostos#1.
+func serverClient(base string) (*http.Client, error) {
+	address, err := url.Parse(base)
+	if err != nil || address.Host == "" || address.User != nil {
+		return nil, errors.New("неверный адрес сервера")
+	}
+	return &http.Client{Timeout: 6 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 || req.URL.Host != address.Host || req.URL.Scheme != address.Scheme {
+			return errors.New("небезопасное перенаправление сервера")
+		}
+		return nil
+	}}, nil
+}
+
 func hello(base string) (serverInfo, error) {
-	c := &http.Client{Timeout: 6 * time.Second}
+	c, err := serverClient(base)
+	if err != nil {
+		return serverInfo{}, err
+	}
 	resp, err := c.Get(base + "/api/v1/hello")
 	if err != nil {
 		return serverInfo{}, fmt.Errorf("нет ответа от %s", base)

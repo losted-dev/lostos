@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Светодиоды Станции 2</title>
+<style>
+  :root { --bg: #0b0b10; --card: #17171f; --line: #2a2a36; --text: #ececf3; --sec: #9a9aaa; --acc: #8b5cf6; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg: #f2f2f7; --card: #fff; --line: #d9d9e3; --text: #14141b; --sec: #6b6b7b; } }
+  :root[data-theme="light"] { --bg: #f2f2f7; --card: #fff; --line: #d9d9e3; --text: #14141b; --sec: #6b6b7b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 40px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 18px; color: var(--sec); }
+  .stage { background: #050507; border-radius: 24px; padding: 14px; display: grid; place-items: center; box-shadow: inset 0 0 0 1px #1c1c26; }
+  canvas { width: 100%; max-width: 640px; height: auto; display: block; }
+  .scenes { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 10px; }
+  button { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 9px 16px; cursor: pointer; }
+  button:hover { border-color: var(--acc); }
+  button.on { background: var(--acc); border-color: var(--acc); color: #fff; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; margin-top: 10px; }
+  .row small { color: var(--sec); }
+  label.btn { display: inline-block; font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 9px 16px; cursor: pointer; }
+  label.btn:hover { border-color: var(--acc); }
+  label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+  input[type=range] { accent-color: var(--acc); }
+  .note { color: var(--sec); font-size: 14px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Светодиоды Станции 2</h1>
+  <p class="sub">Кадры считает настоящий код прошивки (<code>hw/led_matrix.cpp</code>), здесь они только показываются</p>
+  <div class="stage"><canvas id="cv" width="640" height="500"></canvas></div>
+  <pre id="err" style="color:#ff8a80;white-space:pre-wrap;margin:8px 0 0"></pre>
+  <div class="scenes" id="scenes"></div>
+  <div class="row"><span>Видео на панели<br><small>любой ролик, например Bad Apple: он играет со звуком, а панель показывает его яркость в 84 точках. Сам ролик в репозиторий не входит, выберите свой файл</small></span>
+    <span><label class="btn"><input id="vfile" type="file" accept="video/*" hidden>Выбрать видео</label> <button id="vstop" type="button">Остановить</button></span></div>
+  <div class="row"><span>Яркость рассеивателя<br><small>как сильно размыт свет за пластиком</small></span><input id="diff" type="range" min="0" max="100" value="60"></div>
+  <div class="row"><span>Показать точки<br><small>84 светодиода, нумерация как у драйвера</small></span><label><input id="dots" type="checkbox"> да</label></div>
+  <div class="row"><span>Тёмная комната<br><small>в темноте панель ярче по контрасту</small></span><label><input id="dark" type="checkbox" checked> да</label></div>
+  <p class="note">Если эффект выглядит не так, как на колонке, менять нужно <code>src/hw/led_matrix.cpp</code>, затем <code>python tools/led-emulator/build.py</code> и обновить страницу</p>
+</main>
+<script src="frames.js"></script>
+<script>
+(() => {
+  const D = window.LED_FRAMES;
+  if (!D) { document.body.insertAdjacentHTML('beforeend', '<p style="padding:20px">Нет frames.js: выполните <code>python tools/led-emulator/build.py</code></p>'); return; }
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  const PW = 540, PH = PW / D.aspect, PX = (W - PW) / 2, PY = (H - PH) / 2, RAD = 46;
+  const NLOGO = D.logo || 0;
+  const glow = document.createElement('canvas'); glow.width = W; glow.height = H;
+  const g = glow.getContext('2d');
+  const small = document.createElement('canvas'), sg = small.getContext('2d');
+
+  // the frames of every scene as bytes
+  const scenes = {};
+  for (const [id, s] of Object.entries(D.scenes)) {
+    scenes[id] = { ...s, bytes: s.frames.map((h) => Uint8Array.from(h.match(/../g), (x) => parseInt(x, 16))) };
+  }
+  let cur = Object.keys(scenes)[0], t0 = performance.now();
+
+  // a video of your own: its brightness at the position of every dot (the same 84 dots, the ring of the button gets the average)
+  const vid = document.createElement('video'); vid.playsInline = true; vid.loop = true;
+  const vc = document.createElement('canvas'); vc.width = 96; vc.height = 72;
+  const vg = vc.getContext('2d', { willReadFrequently: true });
+  let vidOn = false;
+  function videoPx() {
+    vg.drawImage(vid, 0, 0, vc.width, vc.height);
+    const img = vg.getImageData(0, 0, vc.width, vc.height).data, out = new Uint8Array((D.points.length + NLOGO) * 3);
+    let total = 0;
+    D.points.forEach(([x, y], k) => {
+      const cx = Math.round(x * (vc.width - 1)), cy = Math.round(y * (vc.height - 1));
+      let l = 0, c = 0;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const xx = cx + dx, yy = cy + dy;
+        if (xx < 0 || yy < 0 || xx >= vc.width || yy >= vc.height) continue;
+        const o = (yy * vc.width + xx) * 4; l += 0.299 * img[o] + 0.587 * img[o + 1] + 0.114 * img[o + 2]; c++;
+      }
+      l = c ? l / c : 0; total += l;
+      out[k * 3] = out[k * 3 + 1] = out[k * 3 + 2] = Math.round(Math.pow(l / 255, 1.5) * 255);      // the same gamma step as the daemon
+    });
+    const avg = Math.round(Math.pow(total / D.points.length / 255, 1.5) * 255);
+    for (let j = 0; j < NLOGO; j++) { const o = (D.points.length + j) * 3; out[o] = out[o + 1] = out[o + 2] = avg; }
+    return out;
+  }
+  document.getElementById('vfile').onchange = (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    vid.src = URL.createObjectURL(f); vid.play().then(() => { vidOn = true; mark(); }).catch((x) => { document.getElementById('err').textContent = 'Видео не запустилось: ' + x.message; });
+  };
+  document.getElementById('vstop').onclick = () => { vid.pause(); vidOn = false; mark(); };
+
+  const bar = document.getElementById('scenes');
+  for (const [id, s] of Object.entries(scenes)) {
+    const b = document.createElement('button'); b.textContent = s.label; b.dataset.id = id;
+    b.onclick = () => { cur = id; t0 = performance.now(); vid.pause(); vidOn = false; mark(); };
+    bar.appendChild(b);
+  }
+  const mark = () => bar.querySelectorAll('button').forEach((b) => b.classList.toggle('on', !vidOn && b.dataset.id === cur));
+  mark();
+
+  function roundRect(c, x, y, w, h, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+
+  function draw(now) {
+    try { frame(now); } catch (e) { document.getElementById('err').textContent = 'Ошибка отрисовки: ' + e.message; return; }
+    requestAnimationFrame(draw);
+  }
+  function frame(now) {
+    const s = scenes[cur], n = s.bytes.length;
+    now = performance.now();           // not the timestamp of the animation frame: it can be earlier than t0 and give a negative frame number
+    let i = Math.max(0, Math.floor((now - t0) / 1000 * s.fps));
+    if (s.loop) i %= n; else i = Math.min(i, n - 1);
+    const px = vidOn && vid.readyState >= 2 ? videoPx() : s.bytes[i];
+    const diff = +document.getElementById('diff').value / 100, dark = document.getElementById('dark').checked;
+
+    // light of the dots: soft additive spots (the diffuser mixes the neighbours)
+    g.globalCompositeOperation = 'source-over'; g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+    g.globalCompositeOperation = 'lighter';
+    const R = (PW / 8) * (0.85 + 0.75 * diff);
+    D.points.forEach(([x, y], k) => {
+      const r = px[k * 3], gg = px[k * 3 + 1], b = px[k * 3 + 2];
+      if (r + gg + b < 3) return;
+      const cx = PX + x * PW, cy = PY + y * PH;
+      const grad = g.createRadialGradient(cx, cy, 0, cx, cy, R);
+      grad.addColorStop(0, `rgba(${r},${gg},${b},0.6)`); grad.addColorStop(0.45, `rgba(${r},${gg},${b},0.2)`); grad.addColorStop(1, `rgba(${r},${gg},${b},0)`);
+      g.fillStyle = grad; g.beginPath(); g.arc(cx, cy, R, 0, 7); g.fill();
+    });
+
+    // the panel: milky plastic, the light inside it, the dark slot in the middle (no canvas filters: they are missing in some browsers; the haze is the glow drawn small and stretched back)
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = dark ? '#030304' : '#1b1b21'; ctx.fillRect(0, 0, W, H);
+    ctx.save();
+    roundRect(ctx, PX, PY, PW, PH, RAD); ctx.clip();
+    ctx.fillStyle = dark ? '#0b0a10' : '#1f1e26'; ctx.fillRect(PX, PY, PW, PH);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(glow, 0, 0);                                                       // the colours
+    const k = 10 + Math.round(8 * diff);                                              // the haze: the same light, much blurrier
+    small.width = Math.ceil(W / k); small.height = Math.ceil(H / k);
+    sg.imageSmoothingEnabled = true; sg.clearRect(0, 0, small.width, small.height); sg.drawImage(glow, 0, 0, small.width, small.height);
+    ctx.globalAlpha = 0.3; ctx.drawImage(small, 0, 0, W, H); ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    // the light is strongest round the control strip and dies away to the edges and the corners (the photo of the real speaker)
+    const sh = ctx.createRadialGradient(W / 2, H / 2, PH * 0.12, W / 2, H / 2, PW * 0.6);
+    sh.addColorStop(0, 'rgba(0,0,0,0)'); sh.addColorStop(0.4, 'rgba(0,0,0,0.45)'); sh.addColorStop(1, 'rgba(0,0,0,0.93)');
+    ctx.fillStyle = sh; ctx.fillRect(PX, PY, PW, PH);
+    ctx.restore();
+    // the control strip: a thin black pill with "-", the round Alice button, "+" and four small dots (the picture of the real speaker)
+    const sw = PW * 0.56, sh2 = sw / 4.4, sx = W / 2 - sw / 2, sy = H / 2 - sh2 / 2;
+    ctx.save(); ctx.shadowColor = '#000'; ctx.shadowBlur = 5; ctx.fillStyle = '#050507'; roundRect(ctx, sx, sy, sw, sh2, sh2 / 2); ctx.fill(); ctx.restore();
+    ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,.07)'; ctx.lineWidth = 1; roundRect(ctx, sx, sy, sw, sh2, sh2 / 2); ctx.stroke(); ctx.restore();
+    const bx = W / 2, by = H / 2, br = sh2 * 0.4;
+    ctx.save(); ctx.strokeStyle = 'rgba(210,210,225,.55)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(sx + sw * 0.1, by); ctx.lineTo(sx + sw * 0.1 + 11, by); ctx.stroke();                                   // -
+    ctx.beginPath(); ctx.moveTo(sx + sw * 0.9 - 11, by); ctx.lineTo(sx + sw * 0.9, by); ctx.moveTo(sx + sw * 0.9 - 5.5, by - 5.5); ctx.lineTo(sx + sw * 0.9 - 5.5, by + 5.5); ctx.stroke();   // +
+    ctx.fillStyle = 'rgba(210,210,225,.35)';
+    [[-0.27, -0.14], [-0.27, 0.14], [0.27, -0.14], [0.27, 0.14]].forEach(([dx, dy]) => { ctx.beginPath(); ctx.arc(bx + dx * sw, by + dy * sh2, 1.6, 0, 7); ctx.fill(); });
+    ctx.beginPath(); ctx.arc(bx, by, br, 0, 7); ctx.strokeStyle = 'rgba(220,220,235,.5)'; ctx.lineWidth = 1.5; ctx.stroke();            // the button
+    ctx.restore();
+
+    // the ring of the Alice button: its dots sit on a small circle round the button
+    if (NLOGO) {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      for (let j = 0; j < NLOGO; j++) {
+        const o = (D.points.length + j) * 3, r = px[o], gg = px[o + 1], b = px[o + 2];
+        if (r + gg + b < 3) continue;
+        const ang = -Math.PI / 2 + (j / NLOGO) * 2 * Math.PI, cx = bx + Math.cos(ang) * br * 0.95, cy = by + Math.sin(ang) * br * 0.95, R2 = sh2 * 0.55;
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, R2);
+        grad.addColorStop(0, `rgba(${r},${gg},${b},0.95)`); grad.addColorStop(0.4, `rgba(${r},${gg},${b},0.4)`); grad.addColorStop(1, `rgba(${r},${gg},${b},0)`);
+        ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(cx, cy, R2, 0, 7); ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    if (document.getElementById('dots').checked) {
+      ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+      D.points.forEach(([x, y], k) => {
+        const cx = PX + x * PW, cy = PY + y * PH;
+        ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 7); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.fillText(k, cx, cy - 8);
+      });
+    }
+  }
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

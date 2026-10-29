@@ -5,6 +5,7 @@ __pycache__/
 secrets.enc
 accounts.db
 voices.json
+plugapi.*
 settings.json
 *.log
 build/

@@ -13,13 +13,20 @@
 // ACTION: SHORT on release before 800 ms, LONG as soon as it has been held for 800 ms.
 // VOLUME_*: SHORT on press, auto-repeated every 200 ms after being held for 500 ms, for at most 10 s.
 // Devices that disappear (ENODEV) are looked up again every 3 s; SYN_DROPPED triggers a state resync.
+//
+// Station 1 has no input devices for its keys: they are plain GPIOs that maind reads through sysfs
+// (/sys/class/gpio/gpioN/value, edge "both", poll for POLLPRI). Model::action_gpio feeds the same
+// ACTION logic as the touch key, Model::mute_gpio the mute state, Model::wheel_gpio a quadrature volume
+// wheel (each detent = wheel steps transitions -> one VOLUME_UP/DOWN SHORT).
 #include <fcntl.h>
 #include <linux/input.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
 
@@ -72,6 +79,34 @@ bool test_bit(const unsigned long *bits, int n) {
   return bits[n / (8 * sizeof(long))] >> (n % (8 * sizeof(long))) & 1;
 }
 
+// Quadrature decoding: [previous AB << 2 | current AB] -> -1, 0 (no move, or both lines changed: a
+// missed edge) or +1.
+constexpr int8_t kQuad[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0};
+
+// GPIO value file ready for edge interrupts; exports the pin and sets both edges when needed.
+int open_gpio(unsigned pin) {
+  const std::string dir = "/sys/class/gpio/gpio" + std::to_string(pin);
+  if (access(dir.c_str(), F_OK) != 0) hwutil::write_file("/sys/class/gpio/export", std::to_string(pin));
+  std::string edge;
+  if (!hwutil::read_file(dir + "/edge", edge) || hwutil::trim(edge) != "both") hwutil::write_file(dir + "/edge", "both");
+  int fd = ::open((dir + "/value").c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) LOGE("input: gpio %u: %s", pin, strerror(errno));
+  return fd;
+}
+
+int read_gpio(int fd) {
+  char c = 0;
+  return pread(fd, &c, 1, 0) == 1 ? c == '1' : -1;
+}
+
+// "<pin>,<low|high>" -> pin and the level that means pressed / muted.
+bool parse_gpio(const std::string &v, unsigned &pin, bool &active_high) {
+  char level[8] = "";
+  if (sscanf(v.c_str(), "%u,%7s", &pin, level) != 2) return false;
+  active_high = !strcmp(level, "high");
+  return true;
+}
+
 }  // namespace
 
 struct Input::Impl {
@@ -80,6 +115,10 @@ struct Input::Impl {
   const Model &model;
   int keys_fd = -1, mute_fd = -1;
   bool muted = false;
+  // GPIO keys (Model::action_gpio, mute_gpio, wheel_gpio)
+  int action_gpio = -1, mute_gpio = -1, wheel_a = -1, wheel_b = -1;
+  bool action_high = false, mute_high = false;
+  int wheel_steps = 4, wheel_prev = -1, wheel_acc = 0, wheel_rest = -1;
   ButtonCb button_cb;
   MuteCb mute_cb;
   SwipeCb swipe_cb;
@@ -108,6 +147,7 @@ struct Input::Impl {
       if (t) loop.cancel_timer(t);
     close_dev(keys_fd);
     close_dev(mute_fd);
+    for (int *fd : {&action_gpio, &mute_gpio, &wheel_a, &wheel_b}) close_dev(*fd);
   }
 
   void close_dev(int &fd) {
@@ -313,7 +353,58 @@ struct Input::Impl {
     }
   }
 
+  void on_action_gpio() {
+    const int v = read_gpio(action_gpio);
+    if (v >= 0) on_key(kKeyAction, (v == 1) == action_high ? 1 : 0);
+  }
+
+  void on_mute_gpio() {
+    const int v = read_gpio(mute_gpio);
+    if (v >= 0) set_muted((v == 1) == mute_high);
+  }
+
+  void on_wheel_gpio() {
+    const int a = read_gpio(wheel_a), b = read_gpio(wheel_b);
+    if (a < 0 || b < 0) return;
+    const int cur = a << 1 | b;
+    if (wheel_rest < 0) wheel_rest = cur;  // the wheel is at rest when the daemon starts
+    if (wheel_prev >= 0) wheel_acc += kQuad[wheel_prev << 2 | cur];
+    wheel_prev = cur;
+    // Station 1 (4 transitions per detent): a quick turn loses edges between two reads (both lines
+    // changed), so a detent counts when the wheel is back at rest after at least half of its
+    // transitions; jitter around the rest position (+1 -1) adds up to nothing.
+    const int need = cur == wheel_rest ? std::max(1, wheel_steps / 2) : wheel_steps;
+    if (wheel_acc >= need) emit(Button::VOLUME_UP, Press::SHORT);
+    else if (wheel_acc <= -need) emit(Button::VOLUME_DOWN, Press::SHORT);
+    if (std::abs(wheel_acc) >= need || cur == wheel_rest) wheel_acc = 0;
+  }
+
+  // GPIO keys of the model; the pins are read once now so the first edge compares to a known state.
+  bool open_gpios() {
+    unsigned pin = 0;
+    if (!model.action_gpio.empty() && parse_gpio(model.action_gpio, pin, action_high) && (action_gpio = open_gpio(pin)) >= 0) {
+      read_gpio(action_gpio);
+      loop.add_fd(action_gpio, EPOLLPRI | EPOLLERR, [this](uint32_t) { on_action_gpio(); });
+      LOGI("input: action key on gpio %u (pressed = %s)", pin, action_high ? "high" : "low");
+    }
+    if (!model.mute_gpio.empty() && parse_gpio(model.mute_gpio, pin, mute_high) && (mute_gpio = open_gpio(pin)) >= 0) {
+      loop.add_fd(mute_gpio, EPOLLPRI | EPOLLERR, [this](uint32_t) { on_mute_gpio(); });
+      on_mute_gpio();
+      LOGI("input: mute on gpio %u (muted = %s)", pin, mute_high ? "high" : "low");
+    }
+    unsigned a = 0, b = 0, steps = 0;
+    if (!model.wheel_gpio.empty() && sscanf(model.wheel_gpio.c_str(), "%u,%u,%u", &a, &b, &steps) == 3 &&
+        (wheel_a = open_gpio(a)) >= 0 && (wheel_b = open_gpio(b)) >= 0) {
+      wheel_steps = int(steps);
+      for (int fd : {wheel_a, wheel_b}) loop.add_fd(fd, EPOLLPRI | EPOLLERR, [this](uint32_t) { on_wheel_gpio(); });
+      on_wheel_gpio();
+      LOGI("input: volume wheel on gpio %u/%u, %u transitions per step", a, b, steps);
+    }
+    return action_gpio >= 0 || mute_gpio >= 0 || wheel_a >= 0;
+  }
+
   int open_dev(const std::string &name, bool quiet) {
+    if (name.empty()) return -1;  // the model has no such device (keys on GPIOs)
     std::string path = find_event_dev(name);
     if (path.empty()) {
       if (!quiet) LOGE("input: device \"%s\" not found", name.c_str());
@@ -354,8 +445,10 @@ bool Input::open() {
     d.read_mute_state();
     LOGI("input: initial hardware mute %s", d.muted ? "on" : "off");
   }
-  d.retry_timer = d.loop.add_timer(kReopenMs, [&d] { d.reopen_missing(); }, kReopenMs);
-  return d.keys_fd >= 0 || d.mute_fd >= 0;
+  const bool gpios = d.open_gpios();
+  if (!d.model.keys_input.empty() || !d.model.mute_input.empty())
+    d.retry_timer = d.loop.add_timer(kReopenMs, [&d] { d.reopen_missing(); }, kReopenMs);
+  return d.keys_fd >= 0 || d.mute_fd >= 0 || gpios;
 }
 
 bool Input::hw_muted() const { return impl_->muted; }

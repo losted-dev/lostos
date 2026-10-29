@@ -1,11 +1,17 @@
 #include "model.h"
 
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <sstream>
 
 #include "core/log.h"
+
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 namespace cs {
 
@@ -149,14 +155,20 @@ std::vector<unsigned> numbers(const std::string &s) {
 // "count,first_index,fb_dev,fb_name,trigger,sysfs_kind"
 bool strip_from(const std::string &s, Model::LedStrip &st) {
   const std::vector<std::string> f = split(s, ',');
-  if (f.size() != 6) return false;
+  if (f.size() != 6 && f.size() != 8) return false;       // 6 fields; or 8 with the format and the number of dots of the framebuffer (a flat panel)
   st = {atoi(f[0].c_str()), atoi(f[1].c_str()), f[2], f[3], f[4], f[5]};
+  if (f.size() == 8) {
+    st.format = f[6];
+    st.fb_pixels = atoi(f[7].c_str());
+  }
   return true;
 }
 
 std::string strip_to(const Model::LedStrip &st) {
-  return std::to_string(st.count) + "," + std::to_string(st.first_index) + "," + st.fb_dev + "," + st.fb_name + "," + st.trigger + "," +
-         st.sysfs_kind;
+  std::string o = std::to_string(st.count) + "," + std::to_string(st.first_index) + "," + st.fb_dev + "," + st.fb_name + "," + st.trigger + "," +
+                  st.sysfs_kind;
+  if (!st.format.empty()) o += "," + st.format + "," + std::to_string(st.fb_pixels);
+  return o;
 }
 
 }  // namespace
@@ -170,13 +182,20 @@ std::string dump_profile(const Model &m) {
   o << "# lostOS model profile: one key=value per line, '#' starts a comment (see docs/models.md)\n"
     << "codename=" << m.codename << "\nhost_prefix=" << m.host_prefix << "\nfriendly_name=" << m.friendly_name << "\nmodel_name=" << m.model_name << "\n"
     << "capture_pcm=" << m.capture_pcm << "\ncapture_rate=" << m.capture_rate << "\ncapture_channels=" << m.capture_channels << "\n"
+    << (m.capture_format.empty() ? "" : "capture_format=" + m.capture_format + "\n")
+    << (m.ref_pcm.empty() ? "" : "ref_pcm=" + m.ref_pcm + "\nref_rate=" + std::to_string(m.ref_rate) + "\nref_channels=" + std::to_string(m.ref_channels) + "\n")
+    << (m.ref_format.empty() ? "" : "ref_format=" + m.ref_format + "\n")
     << "mic_channels=" << join(mics, ',') << "\nspk_channels=" << join(spks, ',') << "\nvqe_preset=" << m.vqe_preset << "\n"
     << "led_prefix=" << m.led_prefix << "\nring=" << strip_to(m.ring) << "\n";
   if (m.logo.count > 0) o << "logo=" << strip_to(m.logo) << "\n";
   o << "clock_dir=" << m.clock_dir << "\nclock_seg_base=" << m.clock_seg_base << "\nclock_pos_base=" << m.clock_pos_base << "\n"
     << "clock_colon=" << join(m.clock_colon, ',') << "\nclock_aux=" << join(m.clock_aux, ',') << "\nclock_chip_current=" << (m.clock_chip_current ? 1 : 0)
     << "\n"
-    << "keys_input=" << m.keys_input << "\nmute_input=" << m.mute_input << (m.mute_key ? "\nmute_key=1" : "") << "\nerror_sound=" << m.error_sound << "\nvolume_map=" << join(vm, ',') << "\n";
+    << "keys_input=" << m.keys_input << "\nmute_input=" << m.mute_input << (m.mute_key ? "\nmute_key=1" : "") << "\nerror_sound=" << m.error_sound << "\nvolume_map=" << join(vm, ',') << "\n"
+    << (m.action_gpio.empty() ? "" : "action_gpio=" + m.action_gpio + "\n") << (m.mute_gpio.empty() ? "" : "mute_gpio=" + m.mute_gpio + "\n")
+    << (m.wheel_gpio.empty() ? "" : "wheel_gpio=" + m.wheel_gpio + "\n")
+    << (m.audio_sink.empty() ? "" : "audio_sink=" + m.audio_sink + "\n") << (m.mixer.empty() ? "" : "mixer=" + m.mixer + "\n")
+    << (m.hardvol_file.empty() ? "" : "hardvol=tinyalsa:" + std::to_string(m.hardvol_card) + "," + m.hardvol_file + "\n");
   if (!m.zigbee_tty.empty())
     o << "zigbee_tty=" << m.zigbee_tty << "\nzigbee_reset=" << m.zigbee_reset << "\nzigbee_boot=" << m.zigbee_boot << "\n";
   return o.str();
@@ -211,6 +230,18 @@ bool parse_profile(const std::string &text, Model &m, std::string *error) {
       m.capture_rate = unsigned(strtoul(v.c_str(), nullptr, 10));
     } else if (k == "capture_channels") {
       m.capture_channels = unsigned(strtoul(v.c_str(), nullptr, 10));
+    } else if (k == "capture_format") {
+      if (v != "s16" && v != "s32x2") return fail("capture_format must be s16 or s32x2");
+      m.capture_format = v == "s16" ? "" : v;
+    } else if (k == "ref_pcm") {
+      m.ref_pcm = v;
+    } else if (k == "ref_rate") {
+      m.ref_rate = unsigned(strtoul(v.c_str(), nullptr, 10));
+    } else if (k == "ref_channels") {
+      m.ref_channels = unsigned(strtoul(v.c_str(), nullptr, 10));
+    } else if (k == "ref_format") {
+      if (v != "s16" && v != "s32") return fail("ref_format must be s16 or s32");
+      m.ref_format = v == "s16" ? "" : v;
     } else if (k == "mic_channels") {
       m.mic_channels = numbers(v);
     } else if (k == "spk_channels") {
@@ -220,9 +251,9 @@ bool parse_profile(const std::string &text, Model &m, std::string *error) {
     } else if (k == "led_prefix") {
       m.led_prefix = v;
     } else if (k == "ring") {
-      if (!strip_from(v, m.ring)) return fail("ring needs 6 fields");
+      if (!strip_from(v, m.ring)) return fail("ring needs 6 or 8 fields");
     } else if (k == "logo") {
-      if (!strip_from(v, m.logo)) return fail("logo needs 6 fields");
+      if (!strip_from(v, m.logo)) return fail("logo needs 6 or 8 fields");
     } else if (k == "clock_dir") {
       m.clock_dir = v;
     } else if (k == "clock_seg_base") {
@@ -241,6 +272,29 @@ bool parse_profile(const std::string &text, Model &m, std::string *error) {
       m.mute_input = v;
     } else if (k == "mute_key") {
       m.mute_key = v == "1";
+    } else if (k == "action_gpio" || k == "mute_gpio") {
+      unsigned pin;
+      char level[8];
+      if (sscanf(v.c_str(), "%u,%7s", &pin, level) != 2 || (strcmp(level, "low") && strcmp(level, "high")))
+        return fail(k + " is <pin>,<low|high>");
+      (k == "action_gpio" ? m.action_gpio : m.mute_gpio) = v;
+    } else if (k == "wheel_gpio") {
+      unsigned a, b, steps;
+      if (sscanf(v.c_str(), "%u,%u,%u", &a, &b, &steps) != 3 || a == b || steps == 0 || steps > 4)
+        return fail("wheel_gpio is <pin a>,<pin b>,<1..4 transitions per step>");
+      m.wheel_gpio = v;
+    } else if (k == "audio_sink") {
+      m.audio_sink = v;
+    } else if (k == "mixer") {
+      if (v != "alsa" && v != "soft" && v != "hardvol") return fail("mixer must be alsa, soft or hardvol");
+      m.mixer = v == "alsa" ? "" : v;
+    } else if (k == "hardvol") {
+      const size_t c = v.find(',');
+      if (v.rfind("tinyalsa:", 0) != 0 || c == std::string::npos || c == 9 || v.find_first_not_of("0123456789", 9) != c ||
+          c + 1 >= v.size() || v[c + 1] != '/')
+        return fail("hardvol is tinyalsa:<card>,</absolute/path/of/the/table.xml>");
+      m.hardvol_card = atoi(v.c_str() + 9);
+      m.hardvol_file = v.substr(c + 1);
     } else if (k == "error_sound") {
       m.error_sound = v;
     } else if (k == "volume_map") {
@@ -262,6 +316,18 @@ bool parse_profile(const std::string &text, Model &m, std::string *error) {
   }
   if (m.codename.empty() || m.capture_pcm.empty() || m.capture_rate == 0 || m.mic_channels.empty())
     return fail("codename, capture_pcm, capture_rate and mic_channels are required");
+  if (m.capture_format == "s32x2" && m.capture_channels % 2) return fail("capture_format s32x2 needs an even capture_channels (two lanes per slot)");
+  for (unsigned c : m.mic_channels)
+    if (c >= m.capture_channels) return fail("mic channel " + std::to_string(c) + " is not below capture_channels");
+  if (!m.ref_pcm.empty() &&
+      (m.ref_channels == 0 || m.ref_rate == 0 || m.ref_rate % m.capture_rate != 0 || m.ref_rate / m.capture_rate > 8))
+    return fail("ref_pcm needs ref_channels and a ref_rate of 1..8 times capture_rate");
+  if ((m.mixer == "hardvol") != !m.hardvol_file.empty()) return fail("mixer=hardvol and hardvol= go together");
+  if (m.mixer == "hardvol" && (m.volume_map.size() < 2 || m.volume_map.back().raw > 100))
+    return fail("with mixer=hardvol volume_map gives the HAL's percent (0..100)");
+  const unsigned lanes = m.capture_channels + (m.ref_pcm.empty() ? 0 : m.ref_channels);
+  for (unsigned c : m.spk_channels)
+    if (c >= lanes) return fail("speaker channel " + std::to_string(c) + " is not below capture_channels + ref_channels");
   return true;
 }
 
@@ -269,6 +335,14 @@ const Model *detect_model() {
   static const Model *model = [] () -> const Model * {
     std::ifstream f("/proc/device-tree/compatible", std::ios::binary);
     std::string compat((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+#ifdef __ANDROID__
+    // Station 1 (Allwinner, kernel 3.10) exposes no devicetree; Android names the board in
+    // ro.product.device ("tulip-d1"), taken as if it were "yandex,<device>".
+    if (compat.empty()) {
+      char dev[PROP_VALUE_MAX] = "";
+      if (__system_property_get("ro.product.device", dev) > 0) compat = std::string("yandex,") + dev + '\0';
+    }
+#endif
     // NUL-separated list, e.g. "yandex,cucumber-dvt2\0yandex,cucumber\0amlogic, a5\0".
     for (size_t pos = 0; pos < compat.size();) {
       std::string entry = compat.c_str() + pos;

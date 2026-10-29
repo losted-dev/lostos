@@ -15,6 +15,11 @@ D=${LOSTOS_DIR:-/data/lostos}
 LOG=${LOSTOS_LOG:-/tmp/lostos.log}
 Q=${LOSTOS_Q:-/system/vendor/quasar/q}
 BIN=$D/lostos
+# Station 1 (Android): the busybox tools boot-android.sh links into $D/bin come first; the time zone data of Bionic.
+if [ -d "$D/bin" ]; then
+  PATH="$D/bin:$PATH" ANDROID_DATA=${ANDROID_DATA:-/data} ANDROID_ROOT=${ANDROID_ROOT:-/system}
+  export PATH ANDROID_DATA ANDROID_ROOT
+fi
 MAXLOG=1000000
 LONG=${LOSTOS_LONG:-300}
 CRASHES=5

@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/epoll.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -22,18 +23,173 @@
 #include <memory>
 #include <sstream>
 
+#include <thread>
+
 #include "core/log.h"
 #include "plugins/trust.h"
+#include "update/https.h"
 
 namespace cs {
 
 namespace {
 
 constexpr const char *kRoot = "/data/lostos/plugins";
-constexpr size_t kMaxKeys = 32, kMaxValue = 256, kMaxLine = 1024;
+constexpr const char *kJsRuntime = "/data/lostos/lostos-js";   // plugin-runtime/: the program of every JavaScript plugin
+constexpr size_t kMaxKeys = 32, kMaxValue = 256, kMaxLine = 16384, kMaxScript = 1u << 20, kMaxBody = 256u << 10;
+constexpr int kMaxTools = 16, kMaxHttp = 4;
+constexpr int64_t kResultKeepMs = 20000;
 
 const char *const kKnownPermissions[] = {"device.led", "device.display", "media.control", "device.read", "events.subscribe", "events.publish", "storage",
-                                         "network.connect", "network.listen", "audio.play", "assistant.intercept"};
+                                         "network.connect", "network.listen", "audio.play", "assistant.intercept", "assistant.tools"};
+
+int64_t mono_ms() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return int64_t(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
+
+// JSON: a string literal of s (UTF-8 kept, control characters escaped), and a reader for the flat objects the runtime sends.
+std::string json_quote(const std::string &s) {
+  std::string o = "\"";
+  for (unsigned char c : s) {
+    if (c == '"' || c == '\\') o += '\\', o += char(c);
+    else if (c == '\n') o += "\\n";
+    else if (c == '\r') o += "\\r";
+    else if (c == '\t') o += "\\t";
+    else if (c < 0x20) {
+      char b[8];
+      snprintf(b, sizeof b, "\\u%04x", c);
+      o += b;
+    } else o += char(c);
+  }
+  return o + "\"";
+}
+
+void put_utf8(std::string &o, unsigned cp) {
+  if (cp < 0x80) o += char(cp);
+  else if (cp < 0x800) o += char(0xC0 | (cp >> 6)), o += char(0x80 | (cp & 0x3F));
+  else if (cp < 0x10000) o += char(0xE0 | (cp >> 12)), o += char(0x80 | ((cp >> 6) & 0x3F)), o += char(0x80 | (cp & 0x3F));
+  else o += char(0xF0 | (cp >> 18)), o += char(0x80 | ((cp >> 12) & 0x3F)), o += char(0x80 | ((cp >> 6) & 0x3F)), o += char(0x80 | (cp & 0x3F));
+}
+
+void skip_ws(const std::string &s, size_t &i) {
+  while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+}
+
+bool read_string(const std::string &s, size_t &i, std::string &out) {
+  if (i >= s.size() || s[i] != '"') return false;
+  out.clear();
+  for (i++; i < s.size(); i++) {
+    char c = s[i];
+    if (c == '"') return i++, true;
+    if (c != '\\') {
+      out += c;
+      continue;
+    }
+    if (++i >= s.size()) return false;
+    switch (s[i]) {
+      case 'n': out += '\n'; break;
+      case 't': out += '\t'; break;
+      case 'r': out += '\r'; break;
+      case 'b': out += '\b'; break;
+      case 'f': out += '\f'; break;
+      case 'u': {
+        if (i + 4 >= s.size()) return false;
+        unsigned cp = unsigned(strtoul(s.substr(i + 1, 4).c_str(), nullptr, 16));
+        i += 4;
+        if (cp >= 0xD800 && cp < 0xDC00 && i + 6 < s.size() && s[i + 1] == '\\' && s[i + 2] == 'u') {
+          const unsigned lo = unsigned(strtoul(s.substr(i + 3, 4).c_str(), nullptr, 16));
+          if (lo >= 0xDC00 && lo < 0xE000) cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00), i += 6;
+        }
+        put_utf8(out, cp);
+        break;
+      }
+      default: out += s[i];
+    }
+  }
+  return false;
+}
+
+// Skips any JSON value (the parts of a request this firmware does not use).
+bool skip_value(const std::string &s, size_t &i) {
+  skip_ws(s, i);
+  if (i >= s.size()) return false;
+  if (s[i] == '"') {
+    std::string tmp;
+    return read_string(s, i, tmp);
+  }
+  if (s[i] == '{' || s[i] == '[') {
+    int depth = 0;
+    for (; i < s.size(); i++) {
+      if (s[i] == '"') {
+        std::string tmp;
+        if (!read_string(s, i, tmp)) return false;
+        i--;
+      } else if (s[i] == '{' || s[i] == '[') depth++;
+      else if ((s[i] == '}' || s[i] == ']') && --depth == 0) return i++, true;
+    }
+    return false;
+  }
+  while (i < s.size() && s[i] != ',' && s[i] != '}' && s[i] != ']') i++;
+  return true;
+}
+
+// The members of a JSON object: strings as they are, objects of strings as "name: value" lines (headers), the rest skipped.
+bool read_object(const std::string &s, std::map<std::string, std::string> &str, std::vector<std::string> *pairs = nullptr) {
+  size_t i = 0;
+  skip_ws(s, i);
+  if (i >= s.size() || s[i] != '{') return false;
+  for (i++;;) {
+    skip_ws(s, i);
+    if (i < s.size() && s[i] == '}') return true;
+    std::string key;
+    if (!read_string(s, i, key)) return false;
+    skip_ws(s, i);
+    if (i >= s.size() || s[i] != ':') return false;
+    i++;
+    skip_ws(s, i);
+    if (i < s.size() && s[i] == '"') {
+      std::string v;
+      if (!read_string(s, i, v)) return false;
+      str[key] = v;
+    } else if (i < s.size() && s[i] == '{' && pairs) {
+      const size_t start = i;
+      if (!skip_value(s, i)) return false;
+      std::map<std::string, std::string> inner;
+      read_object(s.substr(start, i - start), inner);
+      for (const auto &kv : inner) pairs->push_back(kv.first + ": " + kv.second);
+    } else if (!skip_value(s, i)) {
+      return false;
+    }
+    skip_ws(s, i);
+    if (i < s.size() && s[i] == ',') i++;
+  }
+}
+
+std::string b64_decode(const std::string &in) {
+  auto val = [](char c) -> int {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+' || c == '-') return 62;
+    if (c == '/' || c == '_') return 63;
+    return -1;
+  };
+  std::string o;
+  int bits = 0, acc = 0;
+  for (char c : in) {
+    const int v = val(c);
+    if (v < 0) continue;
+    acc = (acc << 6) | v, bits += 6;
+    if (bits >= 8) bits -= 8, o += char((acc >> bits) & 0xFF);
+  }
+  return o;
+}
+
+bool same_inode(const std::string &a, const std::string &b) {
+  struct stat sa{}, sb{};
+  return stat(a.c_str(), &sa) == 0 && stat(b.c_str(), &sb) == 0 && sa.st_ino == sb.st_ino && sa.st_dev == sb.st_dev;
+}
 
 bool valid_id(const std::string &id) {
   if (id.size() < 3 || id.size() > 60) return false;
@@ -128,6 +284,7 @@ bool PluginHost::load(const std::string &id) {
     else if (k == "who") p.who = v;
     else if (k == "declared") p.declared = split(v, ',');
   }
+  p.js = access((dir(id) + "/main.js").c_str(), F_OK) == 0;
   p.granted = allowed_for(p, p.granted);   // whatever an earlier firmware granted (the dangerous permissions of a plugin that nobody trusted) is taken back
   std::ifstream d(dir(id) + "/data.txt");
   for (std::string line; std::getline(d, line);) {
@@ -192,6 +349,26 @@ void PluginHost::run(Plugin &p) {
   if (p.proc.pid > 0) return;
   std::string err;
   SandboxLimits lim;
+  if (p.js) {                                                      // the shared runtime is the program: a hard link (one copy on the flash), renewed after an update
+    const std::string prog = dir(p.id) + "/root/plugin";
+    if (access(kJsRuntime, X_OK) != 0) {
+      p.detail = "нет среды JavaScript (обновите lostOS)";
+      if (state_changed) state_changed(p.id + "\terror\t" + p.detail);
+      return;
+    }
+    if (!same_inode(kJsRuntime, prog)) {
+      mkdir((dir(p.id) + "/root").c_str(), 0755);
+      unlink(prog.c_str());
+      if (link(kJsRuntime, prog.c_str()) != 0) {
+        std::ifstream src(kJsRuntime, std::ios::binary);
+        std::ofstream dst(prog, std::ios::binary);
+        dst << src.rdbuf();
+        dst.close();
+        chmod(prog.c_str(), 0755);
+      }
+    }
+    lim.address_space = 64u << 20;                                // QuickJS: its 24 MB heap and the program
+  }
   if (!sandbox_spawn(dir(p.id) + "/root", p.uid, lim, &p.proc, &err)) {
     p.detail = "не запустился: " + err;
     state_changed(p.id + "\terror\t" + p.detail);
@@ -199,10 +376,41 @@ void PluginHost::run(Plugin &p) {
   }
   p.detail = "работает";
   p.inbuf.clear();
+  p.gen++;
+  p.http_busy = 0;
+  p.tools.clear();
+  if (p.js && !send_script(p)) {
+    halt(p);
+    p.detail = "не запустился: скрипт не передан";
+    if (state_changed) state_changed(p.id + "\terror\t" + p.detail);
+    return;
+  }
   const std::string id = p.id;
   loop_.add_fd(p.proc.fd, EPOLLIN, [this, id](uint32_t) { on_readable(id); });
   LOGI("plugin %s started (pid %d, uid %u)", id.c_str(), int(p.proc.pid), p.uid);
   if (state_changed) state_changed(p.id + "\trunning\t");
+}
+
+// The code of a JavaScript plugin goes to the runtime as its first message (the sandbox cannot open files).
+bool PluginHost::send_script(Plugin &p) {
+  std::ifstream f(dir(p.id) + "/main.js", std::ios::binary);
+  std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  if (src.empty() || src.size() > kMaxScript) return false;
+  const std::string msg = "! script " + std::to_string(src.size()) + "\n" + src;
+  size_t off = 0;
+  const int64_t until = mono_ms() + 3000;
+  while (off < msg.size()) {
+    const ssize_t w = send(p.proc.fd, msg.data() + off, msg.size() - off, MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (w > 0) {
+      off += size_t(w);
+      continue;
+    }
+    if (w < 0 && errno != EAGAIN && errno != EINTR) return false;
+    if (mono_ms() > until) return false;
+    pollfd pf{p.proc.fd, POLLOUT, 0};
+    poll(&pf, 1, 200);
+  }
+  return true;
 }
 
 void PluginHost::audio_close(Plugin &p) {
@@ -235,6 +443,9 @@ void PluginHost::release_button(Plugin &p) {
 void PluginHost::halt(Plugin &p) {
   audio_close(p);
   release_button(p);
+  if (p.plays && stop_url) stop_url();
+  p.plays = false;
+  p.tools.clear();
   if (p.proc.fd >= 0) {
     loop_.del_fd(p.proc.fd);
     close(p.proc.fd);
@@ -264,8 +475,18 @@ void PluginHost::reply(Plugin &p, const std::string &n, const std::string &res, 
     c->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(c), &fd, sizeof(int));
   }
-  (void)!sendmsg(p.proc.fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL);
+  ssize_t sent = sendmsg(p.proc.fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL);
   if (fd >= 0) close(fd);                                          // the plugin has its own copy now
+  // A long answer (an HTTP body) does not fit the socket buffer at once: the rest follows as the plugin reads, for up to 2 s;
+  // a plugin that does not read gets a broken line, which only hurts itself.
+  size_t off = sent > 0 ? size_t(sent) : 0;
+  const int64_t until = mono_ms() + 2000;
+  while (off < line.size() && (sent > 0 || errno == EAGAIN || errno == EINTR) && mono_ms() < until) {
+    pollfd pf{p.proc.fd, POLLOUT, 0};
+    poll(&pf, 1, 100);
+    sent = send(p.proc.fd, line.data() + off, line.size() - off, MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (sent > 0) off += size_t(sent);
+  }
 }
 
 void PluginHost::on_readable(const std::string &id) {
@@ -310,8 +531,11 @@ void PluginHost::stopped(Plugin &p) {
   }
   p.proc = SandboxProc();
   p.subscribed.clear();
+  p.tools.clear();
   audio_close(p);
   release_button(p);
+  if (p.plays && stop_url) stop_url();
+  p.plays = false;
   const std::string why = sandbox_describe_exit(st);
   LOGI("plugin %s ended%s%s", p.id.c_str(), why.empty() ? "" : ": ", why.c_str());
   if (!p.enabled) return;
@@ -495,6 +719,42 @@ void PluginHost::handle(Plugin &p, const std::string &line) {
     if (!need("audio.play")) return;
     audio_close(p);
     reply(p, n, "ok");
+  } else if (method == "http") {
+    if (!need("network.connect")) return;
+    http(p, n, args);
+  } else if (method == "play") {
+    if (!need("audio.play")) return;
+    std::map<std::string, std::string> o;
+    if (!read_object(args, o) || (o["url"].rfind("http://", 0) != 0 && o["url"].rfind("https://", 0) != 0)) return reply(p, n, "err arguments");
+    if (play_url) play_url(o["url"], o["title"]);
+    p.plays = true;
+    LOGI("plugin %s plays %s", p.id.c_str(), o["url"].c_str());
+    reply(p, n, "ok");
+  } else if (method == "stop") {
+    if (!need("audio.play")) return;
+    if (p.plays && stop_url) stop_url();
+    p.plays = false;
+    reply(p, n, "ok");
+  } else if (method == "tool") {
+    if (!need("assistant.tools")) return;
+    std::map<std::string, std::string> o;
+    if (!read_object(args, o) || o["name"].empty() || o["name"].size() > 40 || args.size() > 4096 || args.find('\t') != std::string::npos) return reply(p, n, "err arguments");
+    if (!p.tools.count(o["name"]) && int(p.tools.size()) >= kMaxTools) return reply(p, n, "err too many commands");
+    p.tools[o["name"]] = args;
+    LOGI("plugin %s: command %s for the assistant", p.id.c_str(), o["name"].c_str());
+    reply(p, n, "ok");
+    if (state_changed) state_changed(p.id + "\ttools\t");
+  } else if (method == "toolresult") {
+    if (!need("assistant.tools")) return;
+    std::map<std::string, std::string> o;
+    if (!read_object(args, o) || o["id"].empty() || o["id"].size() > 40) return reply(p, n, "err arguments");
+    const int64_t t = mono_ms();
+    results_.erase(std::remove_if(results_.begin(), results_.end(), [t](const Result &r) { return t - r.at > kResultKeepMs; }), results_.end());
+    results_.push_back({p.id, o["id"], json_quote(o["result"].substr(0, 4000)), t});
+    reply(p, n, "ok");
+    if (state_changed) state_changed(p.id + "\tresult\t");
+    const std::string id = p.id;
+    loop_.add_timer(int(kResultKeepMs) + 500, [this, id] { if (state_changed) state_changed(id + "\tresult\t"); });   // drops it from the status
   } else if (method == "publish") {
     if (!need("events.publish")) return;
     const size_t sp = args.find(' ');
@@ -503,6 +763,60 @@ void PluginHost::handle(Plugin &p, const std::string &line) {
   } else {
     reply(p, n, "err unknown method");
   }
+}
+
+// An HTTP(S) request of a plugin, made by the firmware in a thread of its own; the answer comes back on the loop.
+void PluginHost::http(Plugin &p, const std::string &n, const std::string &args) {
+  std::map<std::string, std::string> o;
+  std::vector<std::string> headers;
+  if (!read_object(args, o, &headers)) return reply(p, n, "err arguments");
+  const std::string method = o["method"].empty() ? "GET" : o["method"], url = o["url"];
+  if (method != "GET" && method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" && method != "HEAD") return reply(p, n, "err method");
+  const size_t scheme = url.find("://");
+  if (scheme == std::string::npos || (url.compare(0, scheme, "http") != 0 && url.compare(0, scheme, "https") != 0)) return reply(p, n, "err url");
+  std::string host = url.substr(scheme + 3);
+  host = host.substr(0, host.find_first_of("/?#"));
+  if (host.find('@') != std::string::npos) return reply(p, n, "err url");
+  if (host.front() != '[') host = host.substr(0, host.find(':'));
+  sockaddr_in a{};
+  if (!resolve_ipv4(host, &a)) return reply(p, n, "err no such host");
+  if (is_local_address(a)) {
+    LOGW("plugin %s tried to reach the speaker itself over http (%s)", p.id.c_str(), host.c_str());
+    return reply(p, n, "err forbidden address");
+  }
+  for (const std::string &h : headers)
+    if (h.find('\r') != std::string::npos || h.find('\n') != std::string::npos) return reply(p, n, "err header");
+  if (p.http_busy >= kMaxHttp) return reply(p, n, "err too many requests at once");
+  p.http_busy++;
+  const std::string id = p.id;
+  const unsigned gen = p.gen;
+  std::thread([this, id, gen, n, method, url, headers, body = o["body"]] {
+    const HttpsResponse r = https_request(method, url, headers, body, kMaxBody);
+    const std::string res = r.status ? "ok {\"status\":" + std::to_string(r.status) + ",\"type\":" + json_quote(r.content_type) + ",\"body\":" + json_quote(r.body) + "}"
+                                     : "err " + (r.error.empty() ? std::string("no answer") : r.error.substr(0, 200));
+    loop_.post([this, id, gen, n, res] {
+      auto it = plugins_.find(id);
+      if (it == plugins_.end() || it->second.gen != gen || it->second.proc.fd < 0) return;   // the plugin was stopped meanwhile
+      it->second.http_busy--;
+      reply(it->second, n, res);
+    });
+  }).detach();
+}
+
+// The voice assistant calls a command of a plugin: "! tool {"id","name","args"}" to it; the answer comes as "toolresult".
+void PluginHost::call(const std::string &id, const std::string &call_id, const std::string &b64) {
+  auto it = plugins_.find(id);
+  const std::string req = b64_decode(b64);
+  std::map<std::string, std::string> o;
+  if (it == plugins_.end() || it->second.proc.fd < 0 || !read_object(req, o) || !it->second.tools.count(o["name"]) || call_id.size() > 40) {
+    results_.push_back({id, call_id, json_quote("Ошибка: плагин сейчас не работает"), mono_ms()});
+    if (state_changed) state_changed(id + "\tresult\t");
+    return;
+  }
+  const size_t brace = req.find('{');
+  const std::string line = "! tool {\"id\":" + json_quote(call_id) + "," + req.substr(brace + 1) + "\n";
+  if (line.find('\n') != line.size() - 1) return;                 // one line only
+  (void)!send(it->second.proc.fd, line.data(), line.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
 }
 
 void PluginHost::event(const std::string &name, const std::string &data) {
@@ -515,7 +829,7 @@ void PluginHost::event(const std::string &name, const std::string &data) {
   }
 }
 
-void PluginHost::install(const std::string &id, const std::string &url, const std::string &sha, const std::string &perms, const std::string &dl) {
+void PluginHost::install(const std::string &id, const std::string &url, const std::string &sha, const std::string &perms, const std::string &dl, bool js) {
   if (!valid_id(id) || url.rfind("http://", 0) != 0 || sha.size() != 64 || sha.find_first_not_of("0123456789abcdef") != std::string::npos ||
       (!dl.empty() && dl.rfind("http://", 0) != 0)) {
     LOGW("plugin install refused: bad arguments");
@@ -524,6 +838,7 @@ void PluginHost::install(const std::string &id, const std::string &url, const st
   Plugin p;
   p.id = id;
   p.name = id;
+  p.js = js;
   for (const std::string &g : split(perms, ','))
     for (const char *k : kKnownPermissions)
       if (g == k) p.asked.push_back(g);
@@ -550,8 +865,9 @@ void PluginHost::install(const std::string &id, const std::string &url, const st
           "rm -rf \"$d/trust\"; if [ -n \"$4\" ]; then mkdir -p \"$d/trust\"; "
           "for f in lostos-signature.json manifest.json; do wget -q -T 20 -O \"$d/trust/$f\" \"$4/$5/trust/$f\" || rm -f \"$d/trust/$f\"; done; "
           "for f in developers.json developers.json.sig; do wget -q -T 20 -O \"$d/trust/$f\" \"$4/$f\" || rm -f \"$d/trust/$f\"; done; fi; "
-          "chmod 755 \"$d\" \"$d/root\" \"$d/root/plugin.tmp\"; mv \"$d/root/plugin.tmp\" \"$d/root/plugin\"; : > \"$d/ready\"";
-      execl("/bin/sh", "sh", "-c", script, "sh", dir(id).c_str(), url.c_str(), sha.c_str(), dl.c_str(), id.c_str(), static_cast<char *>(nullptr));
+          "chmod 755 \"$d\" \"$d/root\" \"$d/root/plugin.tmp\"; if [ \"$6\" = js ]; then mv \"$d/root/plugin.tmp\" \"$d/main.js\"; else rm -f \"$d/main.js\"; "
+          "mv \"$d/root/plugin.tmp\" \"$d/root/plugin\"; fi; : > \"$d/ready\"";
+      execl("/bin/sh", "sh", "-c", script, "sh", dir(id).c_str(), url.c_str(), sha.c_str(), dl.c_str(), id.c_str(), js ? "js" : "bin", static_cast<char *>(nullptr));
     }
     _exit(0);
   }
@@ -591,7 +907,9 @@ void PluginHost::command(const std::string &line) {
     system_.set_enabled(w[1], w[0] == "enable");   // no permissions to grant: the system plugins are the system
     if (state_changed) state_changed(w[1] + "\t" + (w[0] == "enable" ? "running" : "off") + "\t");
   } else if (w[0] == "install" && w.size() >= 4) {
-    install(w[1], w[2], w[3], w.size() > 4 && w[4] != "-" ? w[4] : "", w.size() > 5 ? w[5] : "");
+    install(w[1], w[2], w[3], w.size() > 4 && w[4] != "-" ? w[4] : "", w.size() > 5 && w[5] != "-" ? w[5] : "", w.size() > 6 && w[6] == "js");
+  } else if (w[0] == "call" && w.size() >= 4) {
+    call(w[1], w[2], w[3]);
   } else if (w[0] == "remove" && w.size() >= 2 && valid_id(w[1])) {
     auto it = plugins_.find(w[1]);
     if (it != plugins_.end()) {
@@ -627,7 +945,12 @@ std::string PluginHost::status() const {
   for (const auto &kv : plugins_) {
     const Plugin &p = kv.second;
     o += p.id + "\t" + (p.proc.pid > 0 ? "running" : p.enabled ? "restarting" : "off") + "\t" + p.detail + "\n";
+    if (p.proc.pid > 0)
+      for (const auto &t : p.tools) o += p.id + "\ttool\t" + t.second + "\n";
   }
+  const int64_t t = mono_ms();
+  for (const Result &r : results_)
+    if (t - r.at <= kResultKeepMs) o += r.plugin + "\tresult\t" + r.id + "\t" + r.json + "\n";
   return o + system_.plugin_lines();
 }
 

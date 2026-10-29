@@ -177,6 +177,10 @@ func deployFiles(s, bin, ts, arch string, zigbee, legacy bool) (changed, supChan
 		return
 	}
 
+	if !deployJSRuntime(s) {
+		return
+	}
+
 	if !deployProfile(s, code) {
 		return
 	}
@@ -235,6 +239,39 @@ func deployRadioImage(s, name string) bool {
 		return false
 	}
 	return shTo(out, s, "cd "+dataDir+" && mv "+name+".new "+name+" && sync") == nil
+}
+
+// deployJSRuntime copies lostos-js, the runtime of the JavaScript plugins (satellite/plugin-runtime), next to the daemon. The same static
+// ARM program serves every speaker. A payload of an older release has none: the JavaScript plugins then say so on the speaker.
+func deployJSRuntime(s string) bool {
+	var src string
+	for _, c := range []string{filepath.Join(root, "runtime", "lostos-js"), filepath.Join(root, "satellite", "build", "plugin-runtime", "lostos-js-arm-linux-musleabihf")} {
+		if fi, err := os.Stat(c); err == nil && fi.Size() > 0 {
+			src = c
+			break
+		}
+	}
+	if src == "" {
+		fmt.Fprintln(out, "runtime of the JavaScript plugins missing (satellite/plugin-runtime/build.sh), not copied")
+		return true
+	}
+	want := sha256File(src)
+	have, _ := sh(s, "[ -f "+dataDir+"/lostos-js ] && sha256sum "+dataDir+"/lostos-js")
+	if firstField(have) == want {
+		return true
+	}
+	fmt.Fprintf(out, "== %s: runtime of the JavaScript plugins\n", s)
+	if push(s, src, dataDir+"/lostos-js.new") != nil {
+		return false
+	}
+	got, _ := sh(s, "sha256sum "+dataDir+"/lostos-js.new")
+	if firstField(got) != want {
+		_ = shTo(out, s, "rm -f "+dataDir+"/lostos-js.new")
+		fmt.Fprintf(errw, "%s: push corrupted (sha256 mismatch), lostos-js not replaced\n", s)
+		return false
+	}
+	// a new inode: the plugins that run keep the old program, the next start of each takes the new one (a hard link per plugin, see host.cpp)
+	return shTo(out, s, "cd "+dataDir+" && chmod 755 lostos-js.new && mv lostos-js.new lostos-js && sync") == nil
 }
 
 // bootHooks adds the hook lines to rootkeeper.sh (planRootkeeper), keeping a backup.

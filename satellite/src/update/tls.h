@@ -23,10 +23,13 @@ TlsIo tls_write(TlsSock &s, const char *buf, int len, int &n);
 bool tls_pending(TlsSock &s);  // decrypted bytes are already waiting inside the library (poll() would not show them)
 void tls_close(TlsSock &s);
 
-// Ed25519 (needs OpenSSL 1.1.1 or newer; false when the firmware's library has no EVP_DigestSign for it)
+// The firmware's CA bundle (the first of the known places that exists).
+const char *ca_bundle();
+
+// Ed25519: the firmware's OpenSSL when it has it (1.1.1+), else the built-in Monocypher; always available.
 bool ed25519_available();
 bool ed25519_pub(const uint8_t priv[32], uint8_t pub[32]);
 bool ed25519_sign(const uint8_t priv[32], const std::string &msg, uint8_t sig[64]);
-bool ed25519_verify(const uint8_t pub[32], const std::string &msg, const uint8_t sig[64]);   // false also when the library has no Ed25519: nothing is then trusted
+bool ed25519_verify(const uint8_t pub[32], const std::string &msg, const uint8_t sig[64]);
 
 }  // namespace cs

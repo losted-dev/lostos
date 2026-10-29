@@ -9,6 +9,10 @@
 // FBIOPAN_DISPLAY. Cost ~2.5 ms per ring update (i2c), far cheaper than per-LED sysfs writes.
 // If the framebuffers are missing or the triggers are not active, we fall back to the
 // per-channel sysfs brightness files kept open.
+// Station 1 has neither: its 24 RGB LEDs hang on two SN3236 PWM drivers on an I2C bus (strip format
+// "sn3236": fb_dev = the bus, fb_name = the chip addresses "0x3f+0x3c", 12 LEDs per chip in that order;
+// registers: 0x00 = 1 runs, 0x01.. PWM three per LED in the order G, R, B, 0x25 = latch, 0x26.. LED
+// control = 1 on at full current). Found in the vendor tools /system/bin/i2c_24led_*.
 //
 // Ring index order: Yandex patterns (ledpatterns/ring/*.led, one RRGGBB column per LED) anchor
 // their animations at the first LED and grow symmetrically to its neighbours (mute.led,
@@ -21,6 +25,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/fb.h>
+#include <linux/i2c-dev.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -35,6 +40,7 @@
 #include "hw/ambient.h"
 #include "hw/hw.h"
 #include "hw/led_fx.h"
+#include "hw/led_matrix.h"
 #include "hw/sysfs.h"
 
 namespace cs {
@@ -76,15 +82,20 @@ Col to_col(Rgb c) { return fx::rgb(c.r, c.g, c.b); }
 
 struct Leds::Impl {
   Impl(Loop &l, const Model &m)
-      : loop(l), model(m), n(m.ring.count), nlogo(m.logo.count), short_ring(!fx::wide(m.ring.count)),
+      : loop(l), model(m), n(m.ring.count), nlogo(m.logo.count), mx(m.ring.format == "rgbw" && m.ring.count == fx::mx::kLeds),
+        logo_shared(mx && m.logo.count > 0 && m.logo.format == "rgbw"), short_ring(!fx::wide(m.ring.count) || mx),
         shown(size_t(n + nlogo)), from(size_t(n + nlogo)), target(size_t(n + nlogo)), alt(size_t(n)) {}
   Loop &loop;
   const Model &model;
   const int n, nlogo;     // ring / logo LED counts
-  const bool short_ring;  // Lite 2: no logo, mute shown on the ring
+  const bool mx;          // Station 2: the LEDs are a flat 84-dot panel (led_matrix.h), the voice states are drawn on it as a picture, not as a ring
+  const bool logo_shared; // Station 2: the "logo" (the ring of the Alice button) is the dots after the panel in the SAME framebuffer (84..88 of 89), written together with it
+  const bool short_ring;  // Lite 2: no logo, mute shown on the ring (the panel shows it too)
 
   // output
   int fb_ring = -1, fb_logo = -1;
+  int i2c = -1;               // Station 1: the bus of the SN3236 drivers (Model::ring format "sn3236")
+  std::vector<int> i2c_chips;
   fb_var_screeninfo var_ring{}, var_logo{};
   std::vector<int> sysfs_fds;  // fallback: [ring r,g,b x n][logo r,g,b x nlogo]
   std::vector<uint8_t> last;
@@ -148,6 +159,7 @@ struct Leds::Impl {
     clear();  // do not leave the last frame lit after the daemon exits
     if (fb_ring >= 0) close(fb_ring);
     if (fb_logo >= 0) close(fb_logo);
+    if (i2c >= 0) close(i2c);
     for (int fd : sysfs_fds)
       if (fd >= 0) close(fd);
   }
@@ -164,7 +176,7 @@ struct Leds::Impl {
 
   // Opens one strip's framebuffer if its trigger is active and the fb has the expected name.
   int open_strip_fb(const Model::LedStrip &s, fb_var_screeninfo &var) {
-    if (!trigger_is(led_name(s, "red", 0), s.trigger)) {
+    if (s.trigger != "none" && !trigger_is(led_name(s, "red", 0), s.trigger)) {
       LOGW("leds: trigger %s not active on %s", s.trigger.c_str(), led_name(s, "red", 0).c_str());
       return -1;
     }
@@ -185,12 +197,64 @@ struct Leds::Impl {
 
   bool open_fb() {
     fb_ring = open_strip_fb(model.ring, var_ring);
-    if (nlogo) fb_logo = open_strip_fb(model.logo, var_logo);
-    if (fb_ring >= 0 && (!nlogo || fb_logo >= 0)) return true;
+    if (nlogo && !logo_shared) fb_logo = open_strip_fb(model.logo, var_logo);
+    if (fb_ring >= 0 && (!nlogo || logo_shared || fb_logo >= 0)) return true;
     if (fb_ring >= 0) close(fb_ring);
     if (fb_logo >= 0) close(fb_logo);
     fb_ring = fb_logo = -1;
     return false;
+  }
+
+  bool i2c_write(int chip, uint8_t reg, const uint8_t *data, size_t len) {
+    uint8_t buf[64];
+    buf[0] = reg;
+    memcpy(buf + 1, data, len);
+    return ioctl(i2c, I2C_SLAVE_FORCE, chip) >= 0 && write(i2c, buf, len + 1) == ssize_t(len + 1);
+  }
+
+  bool open_i2c() {
+    if (model.ring.format != "sn3236") return false;
+    for (size_t pos = 0; pos < model.ring.fb_name.size();) {
+      size_t end = model.ring.fb_name.find('+', pos);
+      if (end == std::string::npos) end = model.ring.fb_name.size();
+      i2c_chips.push_back(int(strtol(model.ring.fb_name.substr(pos, end - pos).c_str(), nullptr, 0)));
+      pos = end + 1;
+    }
+    if (i2c_chips.empty() || n > int(i2c_chips.size()) * 12 || nlogo) {
+      LOGE("leds: sn3236: %d LEDs do not fit %zu chips (12 each, no logo)", n, i2c_chips.size());
+      return false;
+    }
+    i2c = ::open(model.ring.fb_dev.c_str(), O_RDWR | O_CLOEXEC);
+    if (i2c < 0) {
+      LOGE("leds: open %s: %s", model.ring.fb_dev.c_str(), strerror(errno));
+      return false;
+    }
+    const uint8_t one = 1;
+    std::vector<uint8_t> on(36, 1);
+    for (int chip : i2c_chips)
+      if (!i2c_write(chip, 0x00, &one, 1) || !i2c_write(chip, 0x26, on.data(), on.size())) {
+        LOGE("leds: sn3236 at 0x%02x on %s does not answer", chip, model.ring.fb_dev.c_str());
+        close(i2c);
+        i2c = -1;
+        return false;
+      }
+    return true;
+  }
+
+  // px: RGB per LED; chips whose 12 LEDs did not change since the last frame are skipped.
+  void write_i2c(const uint8_t *px, const uint8_t *prev) {
+    for (size_t c = 0; c < i2c_chips.size(); c++) {
+      const int first = int(c) * 12, cnt = std::min(12, n - first);
+      if (cnt <= 0) break;
+      if (prev && memcmp(px + first * 3, prev + first * 3, size_t(cnt) * 3) == 0) continue;
+      uint8_t pwm[36] = {};
+      for (int i = 0; i < cnt; i++) {
+        const uint8_t *p = px + (first + i) * 3;
+        pwm[i * 3] = p[1], pwm[i * 3 + 1] = p[0], pwm[i * 3 + 2] = p[2];
+      }
+      const uint8_t latch = 0;
+      if (!i2c_write(i2c_chips[c], 0x01, pwm, sizeof pwm) || !i2c_write(i2c_chips[c], 0x25, &latch, 1)) warn_write(0, "ring i2c");
+    }
   }
 
   bool open_sysfs() {
@@ -231,12 +295,22 @@ struct Leds::Impl {
 
   // Writes count pixels of px (RGB) to a framebuffer as BGR and latches them.
   // which: 0 = ring, 1 = logo (write warning rate limit).
-  void write_fb(int fd, fb_var_screeninfo &var, const uint8_t *px, int count, int which, const char *what) {
-    std::vector<uint8_t> bgr(size_t(count) * 3);
-    for (int i = 0; i < count; i++) {
-      bgr[i * 3] = px[i * 3 + 2];
-      bgr[i * 3 + 1] = px[i * 3 + 1];
-      bgr[i * 3 + 2] = px[i * 3];
+  void write_fb(int fd, fb_var_screeninfo &var, const uint8_t *px, int count, int which, const char *what, const Model::LedStrip &strip) {
+    std::vector<uint8_t> bgr;
+    if (strip.format == "rgbw") {            // Station 2: R, G, B, 0 per dot; the dots after count (the framebuffer has 89) stay dark
+      bgr.assign(size_t(std::max(count, strip.fb_pixels)) * 4, 0);
+      for (int i = 0; i < count; i++) {
+        bgr[size_t(i) * 4] = px[i * 3];
+        bgr[size_t(i) * 4 + 1] = px[i * 3 + 1];
+        bgr[size_t(i) * 4 + 2] = px[i * 3 + 2];
+      }
+    } else {
+      bgr.resize(size_t(count) * 3);
+      for (int i = 0; i < count; i++) {
+        bgr[i * 3] = px[i * 3 + 2];
+        bgr[i * 3 + 1] = px[i * 3 + 1];
+        bgr[i * 3 + 2] = px[i * 3];
+      }
     }
     if (pwrite(fd, bgr.data(), bgr.size(), 0) != ssize_t(bgr.size())) warn_write(which, what);
     ioctl(fd, FBIOPAN_DISPLAY, &var);  // latch
@@ -262,11 +336,14 @@ struct Leds::Impl {
     std::vector<uint8_t> px(size_t(n + nlogo) * 3);
     for (int i = 0; i < n + nlogo; i++) to_px(frame[i], &px[size_t(i) * 3]);
     const bool have_last = !last.empty();
-    if (fb_ring >= 0) {
-      if (!have_last || memcmp(px.data(), last.data(), size_t(n) * 3) != 0)
-        write_fb(fb_ring, var_ring, px.data(), n, 0, "ring fb");
+    if (i2c >= 0) {
+      write_i2c(px.data(), have_last ? last.data() : nullptr);
+    } else if (fb_ring >= 0) {
+      const int together = logo_shared ? nlogo : 0;           // the logo follows the panel in the same framebuffer
+      if (!have_last || memcmp(px.data(), last.data(), size_t(n + together) * 3) != 0)
+        write_fb(fb_ring, var_ring, px.data(), n + together, 0, "ring fb", model.ring);
       if (fb_logo >= 0 && (!have_last || memcmp(px.data() + n * 3, last.data() + n * 3, size_t(nlogo) * 3) != 0))
-        write_fb(fb_logo, var_logo, px.data() + n * 3, nlogo, 1, "logo fb");
+        write_fb(fb_logo, var_logo, px.data() + n * 3, nlogo, 1, "logo fb", model.logo);
     } else {
       for (size_t k = 0; k < sysfs_fds.size(); k++)
         if (!have_last || px[k] != last[k]) hwutil::write_int_fd(sysfs_fds[k], px[k]);
@@ -341,19 +418,27 @@ struct Leds::Impl {
     bool animated = true;
     switch (lay) {
       case L_VOLUME:
-        fx::volume(volume, ring, n);
+        if (mx) fx::mx::volume(volume, ring, n);
+        else fx::volume(volume, ring, n);
         animated = false;
         break;
-      case L_VOICE: fx::voice(to_voice(state), now - state_t0, ring, n); break;
+      case L_VOICE:
+        if (mx) fx::mx::voice(to_voice(state), now - state_t0, ring, n);
+        else fx::voice(to_voice(state), now - state_t0, ring, n);
+        break;
       case L_ONESHOT:
-        if (sweep != Sweep::NONE)
-          fx::mute_sweep(sweep == Sweep::MUTE_ON, now - sweep_t0, ring, n);
-        else
-          fx::timer_started(now - timer_t0, ring, n);
+        if (sweep != Sweep::NONE) {
+          if (mx) fx::mx::mute_sweep(sweep == Sweep::MUTE_ON, now - sweep_t0, ring, n);
+          else fx::mute_sweep(sweep == Sweep::MUTE_ON, now - sweep_t0, ring, n);
+        } else {
+          if (mx) fx::mx::timer_started(now - timer_t0, ring, n);
+          else fx::timer_started(now - timer_t0, ring, n);
+        }
         break;
       case L_SHOW: animated = fx::effect(show_effect, show_col, 1, phase, dt, show_fx, ring, n); break;
       case L_MUTE:
-        std::fill(ring, ring + n, fx::mute_steady());
+        if (mx) fx::mx::mute_steady(ring, n);
+        else std::fill(ring, ring + n, fx::mute_steady());
         animated = false;
         break;
       case L_USER: animated = fx::effect(user_effect, user_col, user_bri, phase, dt, user_fx, ring, n); break;
@@ -510,7 +595,10 @@ Leds::~Leds() = default;
 
 bool Leds::open() {
   auto &d = *impl_;
-  if (d.open_fb()) {
+  if (d.model.ring.format == "sn3236") {
+    if (!d.open_i2c()) return false;
+    LOGI("leds: driving %d ring LEDs via SN3236 on %s (%s)", d.n, d.model.ring.fb_dev.c_str(), d.model.ring.fb_name.c_str());
+  } else if (d.open_fb()) {
     LOGI("leds: driving %d ring + %d logo LEDs via framebuffer", d.n, d.nlogo);
   } else if (d.open_sysfs()) {
     LOGI("leds: driving %d ring + %d logo LEDs via sysfs brightness", d.n, d.nlogo);

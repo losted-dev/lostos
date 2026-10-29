@@ -65,6 +65,20 @@ bool read_file(const std::string &path, std::string &out) {
 std::string run_version(const std::string &path) {
   int p[2];
   if (pipe2(p, O_CLOEXEC) != 0) return "";
+#if defined(__ANDROID__) && __ANDROID_API__ < 28
+  // No posix_spawn before Android 9: fork + exec, the same unblocked signal mask and stdout.
+  char *argv[] = {const_cast<char *>(path.c_str()), const_cast<char *>("--version"), nullptr};
+  pid_t pid = fork();
+  if (pid == 0) {
+    sigset_t none;
+    sigemptyset(&none);
+    sigprocmask(SIG_SETMASK, &none, nullptr);  // the daemon blocks SIGTERM in every thread
+    dup2(p[1], 1);
+    execv(path.c_str(), argv);
+    _exit(127);
+  }
+  int rc = pid > 0 ? 0 : errno;
+#else
   posix_spawn_file_actions_t fa;
   posix_spawn_file_actions_init(&fa);
   posix_spawn_file_actions_adddup2(&fa, p[1], 1);
@@ -79,6 +93,7 @@ std::string run_version(const std::string &path) {
   int rc = posix_spawn(&pid, path.c_str(), &fa, &attr, argv, environ);
   posix_spawn_file_actions_destroy(&fa);
   posix_spawnattr_destroy(&attr);
+#endif
   close(p[1]);
   std::string out;
   if (rc == 0) {

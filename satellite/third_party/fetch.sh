@@ -32,3 +32,6 @@ fetch noise-c https://github.com/esphome-libs/noise-c.git refs/tags/v0.1.13
 fetch IXWebSocket https://github.com/machinezone/IXWebSocket.git refs/tags/v12.0.1
 fetch micro-flac https://github.com/esphome-libs/micro-flac.git refs/tags/v0.3.0 lib/micro-ogg-demuxer
 fetch micro-opus https://github.com/esphome-libs/micro-opus.git refs/tags/v0.3.5 lib/opus lib/micro-ogg-demuxer
+fetch quickjs-ng https://github.com/quickjs-ng/quickjs.git refs/tags/v0.10.1
+# Ed25519 for firmwares whose OpenSSL has none (Station 1: OpenSSL 1.1.0e; EVP Ed25519 came in 1.1.1). CC0 / BSD-2.
+fetch monocypher https://github.com/LoupVaillant/Monocypher.git refs/tags/4.0.2

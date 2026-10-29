@@ -14,6 +14,7 @@ namespace cs {
 struct HttpsResponse {
   int status = 0;        // HTTP status of the final response; 0 = transport/TLS error
   std::string body;
+  std::string content_type;
   std::string location;  // Location of a redirect that was not followed
   std::string error;     // set when status == 0 or the body exceeded max_bytes
 };
@@ -25,6 +26,11 @@ struct HttpsResponse {
 HttpsResponse https_get(const std::string &url, const std::vector<std::string> &headers, size_t max_bytes,
                         const std::function<void(size_t, size_t)> &progress = {},
                         const std::atomic<bool> *cancel = nullptr, int max_redirects = 5);
+
+// Any method, https:// or plain http:// (home network services), with a body. A 301/302/303 is followed as a GET without the body
+// (as browsers do), 307/308 with the same method and body. Used by the plugins of the speaker (plugins/host.cpp).
+HttpsResponse https_request(const std::string &method, const std::string &url, const std::vector<std::string> &headers, const std::string &body,
+                            size_t max_bytes, int max_redirects = 5);
 
 // Lower-case hex SHA-256 via the firmware's libcrypto; "" if it is unavailable.
 std::string sha256_hex(const std::string &data);
