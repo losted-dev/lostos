@@ -96,7 +96,7 @@ struct LightState {
 };
 
 // Auxiliary entities. Keys are stable and owned by the server.
-enum class SwitchId : uint32_t { MIC_MUTE = 1, CLOCK = 2, AUTO_UPDATE = 3, NEAREST_ANSWERS = 4, VOICE_INDICATION = 5, VOLUME_SOUND = 6, LYRICS = 7, COVER_LOOKUP = 8, ALICE_BUTTON = 9 };
+enum class SwitchId : uint32_t { MIC_MUTE = 1, CLOCK = 2, AUTO_UPDATE = 3, NEAREST_ANSWERS = 4, VOICE_INDICATION = 5, VOLUME_SOUND = 6, LYRICS = 7, COVER_LOOKUP = 8, ALICE_BUTTON = 9, CLOCK_AUTODIM = 10 };
 enum class SensorId : uint32_t { ILLUMINANCE = 1 };
 enum class BinarySensorId : uint32_t { HW_MIC_MUTE = 1 };
 // 0..100 %; 100..2000 ms; 0.25..4 ×
@@ -104,7 +104,7 @@ enum class NumberId : uint32_t { CLOCK_BRIGHTNESS = 1, CLOCK_SCROLL = 2, LED_SPE
 enum class TextId : uint32_t { CLOCK_TEXT = 1 };
 enum class SelectId : uint32_t { CLOCK_FACE = 1, ZIGBEE_MODE = 2, MUSIC_VIZ = 3, CASE_COLOR = 4, CLOCK_EQ = 5, CLOCK_EQ_STYLE = 6 };
 enum class ButtonId : uint32_t { ZIGBEE_JOIN = 1, ZIGBEE_LEAVE = 2 };
-enum class TextSensorId : uint32_t { ZIGBEE = 1, AIRPLAY_NOW = 2, SPOTIFY_NOW = 3, WIFI = 4, BLUETOOTH = 5, NOW_PLAYING = 6, SPOTIFY_COVER = 7, PLAYBACK = 8, MEDIA = 9, EQ = 10, PLUGINS = 11, SYSINFO = 12, DISPLAY = 13 };
+enum class TextSensorId : uint32_t { ZIGBEE = 1, AIRPLAY_NOW = 2, SPOTIFY_NOW = 3, WIFI = 4, BLUETOOTH = 5, NOW_PLAYING = 6, SPOTIFY_COVER = 7, PLAYBACK = 8, MEDIA = 9, EQ = 10, PLUGINS = 11, SYSINFO = 12, DISPLAY = 13, VOICEPRINT = 14 };
 enum class ActionId : uint32_t { CLOCK_SHOW_TEXT = 1, CLOCK_SHOW_FACE = 2, CLOCK_ANIM = 3, AIRPLAY = 4, WIFI = 5, ASSISTANT = 6 };  // args (text|face|program, seconds)
 enum class EventId : uint32_t { BUTTON = 1 };             // event types: "action", "action_long", "volume_up", "volume_down"
 

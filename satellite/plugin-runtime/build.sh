@@ -9,17 +9,21 @@ OUT=${1:-$SAT/build/plugin-runtime}
 TARGET=${2:-arm-linux-musleabihf}
 ZIG=${ZIG:-zig}
 QJS=$SAT/third_party/src/quickjs-ng
-[ -f "$QJS/quickjs.c" ] || sh "$SAT/third_party/fetch.sh"
+LUA=$SAT/third_party/src/lua
+[ -f "$QJS/quickjs.c" ] && [ -f "$LUA/lua.h" ] || sh "$SAT/third_party/fetch.sh"
 mkdir -p "$OUT"
 # prelude.js as a C array (no tool beyond od and sed)
 {
   printf 'const char prelude_js[] = {'
   od -An -v -tx1 "$HERE/prelude.js" | sed 's/ \([0-9a-f][0-9a-f]\)/0x\1,/g'
   printf '0};\nconst unsigned prelude_js_len = sizeof prelude_js - 1;\n'
+  printf 'const char prelude_lua[] = {'
+  od -An -v -tx1 "$HERE/prelude.lua" | sed 's/ \([0-9a-f][0-9a-f]\)/0x\1,/g'
+  printf '0};\nconst unsigned prelude_lua_len = sizeof prelude_lua - 1;\n'
 } >"$OUT/prelude.c"
 CPU=""
 case "$TARGET" in arm-*) CPU="-mcpu=cortex_a53" ;; esac
 $ZIG cc -target "$TARGET" $CPU -static -Os -s -ffunction-sections -fdata-sections -Wl,--gc-sections -D_GNU_SOURCE -std=gnu11 -w \
-  -I"$QJS" "$HERE/lostos-js.c" "$OUT/prelude.c" "$QJS/quickjs.c" "$QJS/libregexp.c" "$QJS/libunicode.c" "$QJS/cutils.c" "$QJS/xsum.c" -lm \
+  -I"$QJS" -I"$LUA" -I"$HERE" "$HERE/lostos-js.c" "$OUT/prelude.c" "$QJS/quickjs.c" "$QJS/libregexp.c" "$QJS/libunicode.c" "$QJS/cutils.c" "$QJS/xsum.c"   $(ls "$LUA"/*.c | grep -v -e '/lua\.c$' -e '/luac\.c$' -e '/onelua\.c$' -e '/ltests\.c$') -DLUA_USE_POSIX -lm \
   -o "$OUT/lostos-js-$TARGET"
 ls -l "$OUT/lostos-js-$TARGET"

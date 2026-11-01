@@ -60,7 +60,7 @@ type probeResult struct {
 
 var probed []probeResult
 
-var codename = regexp.MustCompile(`yandex,([a-z0-9_]*)`)
+var codename = regexp.MustCompile(`yandex,([a-z0-9_-]*)`)
 
 // probe prints one status line for s and records it in found if it is installable. A device we
 // connected to ourselves is disconnected again when it is not.

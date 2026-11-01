@@ -17,6 +17,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <set>
 #include <vector>
 
 #include "core/log.h"
@@ -127,6 +128,23 @@ bool private_ipv4(const std::string &h) {
   char tail = 0;
   if (sscanf(h.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4 || a > 255 || b > 255 || c > 255 || d > 255) return false;
   return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
+}
+
+// The TCP ports on which programs of plugins listen (their user ids start at 40000): the web page of a plugin written for Luna is there. The server reaches them through the link
+// as the forwards "pw<port>", and only these: the address is always this speaker's own loopback, the port must be one a plugin's program holds.
+std::vector<int> plugin_web_ports() {
+  std::vector<int> out;
+  for (const char *file : {"/proc/net/tcp", "/proc/net/tcp6"}) {
+    std::ifstream f(file);
+    std::string line;
+    std::getline(f, line);                                     // the header
+    while (std::getline(f, line)) {
+      unsigned port = 0, st = 0, uid = 0;
+      if (sscanf(line.c_str(), " %*d: %*64[0-9A-Fa-f]:%x %*64[0-9A-Fa-f]:%*x %x %*x:%*x %*x:%*x %*x %u", &port, &st, &uid) != 3) continue;
+      if (st == 0x0A && uid >= 40000 && uid < 50000 && port > 0 && port < 65536 && std::find(out.begin(), out.end(), int(port)) == out.end()) out.push_back(int(port));
+    }
+  }
+  return out;
 }
 
 std::vector<Forward> read_forwards() {
@@ -333,6 +351,14 @@ bool LinkClient::session() {
   const std::vector<Forward> forwards = read_forwards();
   bool up = false;
   auto send_text = [&](const std::string &s) { ws_frame(out, 1, s.data(), s.size()); };
+  std::set<int> announced;                                       // the plugin ports the server was told about on this connection
+  auto announce_ports = [&]() {
+    for (int port : plugin_web_ports()) {
+      if (!announced.insert(port).second) continue;
+      send_text("{\"t\":\"forward\",\"name\":\"pw" + std::to_string(port) + "\",\"addr\":\"127.0.0.1:" + std::to_string(port) + "\"}");
+    }
+  };
+  auto ports_checked = std::chrono::steady_clock::now();
   auto drop = [&](uint32_t sid, bool tell) {
     auto it = streams.find(sid);
     if (it == streams.end()) return;
@@ -443,6 +469,8 @@ bool LinkClient::session() {
           if (st == "confirmed") {
             // the vault key: made on this speaker, it opens the encrypted keys of the owner's server for as long as the speaker is connected
             uint8_t vk[32];
+            announced.clear();
+            announce_ports();
             for (const Forward &fw : forwards) send_text("{\"t\":\"forward\",\"name\":" + json_str(fw.name) + ",\"addr\":" + json_str(fw.host + ":" + std::to_string(fw.port)) + "}");
             if (read_key(vk, "vault.key")) send_text("{\"t\":\"vaultkey\",\"key\":\"" + b64(vk, 32) + "\"}");
             memset(vk, 0, sizeof vk);
@@ -458,7 +486,11 @@ bool LinkClient::session() {
           int p = atoi(jget(payload, "port").c_str());
           uint32_t target = htonl(INADDR_LOOPBACK);
           const std::string fwname = jget(payload, "forward");
-          if (!fwname.empty()) {                       // a forward: the address comes from OUR link.conf, never from the server
+          if (fwname.size() > 2 && fwname.compare(0, 2, "pw") == 0) {     // the web page of a plugin's program: only a port that such a program really listens on
+            p = atoi(fwname.c_str() + 2);
+            const std::vector<int> live = plugin_web_ports();
+            if (std::find(live.begin(), live.end(), p) == live.end()) p = 0;
+          } else if (!fwname.empty()) {                // a forward: the address comes from OUR link.conf, never from the server
             p = 0;
             for (const Forward &fw : forwards) {
               if (fw.name != fwname) continue;
@@ -497,6 +529,10 @@ bool LinkClient::session() {
       }
     }
     if (!alive) break;
+    if (state_ == 3 && std::chrono::steady_clock::now() - ports_checked > std::chrono::seconds(5)) {   // a program of a plugin that started later
+      ports_checked = std::chrono::steady_clock::now();
+      announce_ports();
+    }
     if (!press_nonce.empty()) {
       if (press_hit_.exchange(false)) {
         send_text("{\"t\":\"pressed\",\"nonce\":" + json_str(press_nonce) + "}");

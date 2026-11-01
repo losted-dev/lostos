@@ -27,7 +27,7 @@ await lostos.tool({ name: "spin", description: "крутится вечно" }, 
 await lostos.tool({ name: "fetch_test", description: "HTTP" }, async () => {
   const r = await lostos.http("http://127.0.0.1:" + globalThis.PORT + "/data.json");
   const j = r.json();
-  await lostos.play(j.url, { title: j.title });
+  await lostos.play(j.url, { title: j.title, cover: "https://radio.example/logo.png", source: "Радио" });
   return `got ${r.status} ${j.title}`;
 });
 globalThis.PORT = await lostos.storage.get("port");
@@ -151,7 +151,7 @@ def main():
     check("tools were declared with a JSON schema", tools.get("add_numbers", {}).get("parameters", {}).get("required") == ["a", "b"] and "spin" in tools, tools)
     check("a tool call answers", results.get("c1") == "сумма 42", results)
     check("a runaway tool is interrupted and reported", "c2" in results and results["c2"].startswith("Ошибка"), results.get("c2"))
-    check("http + play from a tool", results.get("c3") == "got 200 Тест-радио" and plays and plays[0]["title"] == "Тест-радио", (results.get("c3"), plays))
+    check("http + play from a tool", results.get("c3") == "got 200 Тест-радио" and plays and plays[0]["title"] == "Тест-радио" and plays[0].get("cover") == "https://radio.example/logo.png" and plays[0].get("source") == "Радио", (results.get("c3"), plays))
     check("an unknown tool answers an error", results.get("c4", "").startswith("Ошибка"), results.get("c4"))
     check("the plugin survived all of it", alive)
     print("ALL PASS" if OK else "SOME FAILED")

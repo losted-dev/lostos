@@ -34,13 +34,30 @@ namespace cs {
 namespace {
 
 constexpr const char *kRoot = "/data/lostos/plugins";
-constexpr const char *kJsRuntime = "/data/lostos/lostos-js";   // plugin-runtime/: the program of every JavaScript plugin
+constexpr const char *kJsRuntime = "/data/lostos/lostos-js";
+constexpr const char *kFfmpeg = "/data/lostos/ffmpeg";   // a static aarch64 ffmpeg (tools/build-ffmpeg.sh) that programs of plugins find as /opt/bin/ffmpeg   // plugin-runtime/: the program of every JavaScript plugin
 constexpr size_t kMaxKeys = 32, kMaxValue = 256, kMaxLine = 16384, kMaxScript = 1u << 20, kMaxBody = 256u << 10;
 constexpr int kMaxTools = 16, kMaxHttp = 4;
 constexpr int64_t kResultKeepMs = 20000;
 
 const char *const kKnownPermissions[] = {"device.led", "device.display", "media.control", "device.read", "events.subscribe", "events.publish", "storage",
-                                         "network.connect", "network.listen", "audio.play", "assistant.intercept", "assistant.tools"};
+                                         "network.connect", "network.listen", "audio.play", "assistant.intercept", "assistant.tools", "exec.bin64"};
+
+// The TCP ports a user id listens on (a program of a plugin has a user id of its own): the page of a plugin is behind one of them.
+std::vector<int> listening_ports(unsigned want_uid) {
+  std::vector<int> out;
+  for (const char *file : {"/proc/net/tcp", "/proc/net/tcp6"}) {
+    std::ifstream f(file);
+    std::string line;
+    std::getline(f, line);
+    while (std::getline(f, line)) {
+      unsigned port = 0, st = 0, uid = 0;
+      if (sscanf(line.c_str(), " %*d: %*64[0-9A-Fa-f]:%x %*64[0-9A-Fa-f]:%*x %x %*x:%*x %*x:%*x %*x %u", &port, &st, &uid) != 3) continue;
+      if (st == 0x0A && uid == want_uid && port > 0 && std::find(out.begin(), out.end(), int(port)) == out.end()) out.push_back(int(port));
+    }
+  }
+  return out;
+}
 
 int64_t mono_ms() {
   timespec ts;
@@ -285,6 +302,7 @@ bool PluginHost::load(const std::string &id) {
     else if (k == "declared") p.declared = split(v, ',');
   }
   p.js = access((dir(id) + "/main.js").c_str(), F_OK) == 0;
+  p.bin64 = access((dir(id) + "/bin64").c_str(), F_OK) == 0;
   p.granted = allowed_for(p, p.granted);   // whatever an earlier firmware granted (the dangerous permissions of a plugin that nobody trusted) is taken back
   std::ifstream d(dir(id) + "/data.txt");
   for (std::string line; std::getline(d, line);) {
@@ -321,7 +339,10 @@ std::vector<std::string> PluginHost::allowed_for(const Plugin &p, const std::vec
   PluginTrust t;
   t.trusted = p.trusted;
   t.declared = p.declared;
-  return permissions_to_grant(known, t);
+  std::vector<std::string> out = permissions_to_grant(known, t);
+  if (p.bin64 && std::find(known.begin(), known.end(), "exec.bin64") != known.end() && std::find(out.begin(), out.end(), "exec.bin64") == out.end())
+    out.push_back("exec.bin64");                                   // the owner allowed it in his panel (the server asks only for what he allowed): that is his consent for a program of his own plugin
+  return out;
 }
 
 // Called when a package has been downloaded: the speaker looks at the signature itself, whatever the server says about the plugin.
@@ -369,7 +390,56 @@ void PluginHost::run(Plugin &p) {
     }
     lim.address_space = 64u << 20;                                // QuickJS: its 24 MB heap and the program
   }
-  if (!sandbox_spawn(dir(p.id) + "/root", p.uid, lim, &p.proc, &err)) {
+  bool spawned;
+  if (p.bin64) {
+    if (!allowed(p, "exec.bin64")) {
+      p.detail = "нет разрешения запускать программу (разрешите его в панели)";
+      if (state_changed) state_changed(p.id + "\terror\t" + p.detail);
+      return;
+    }
+    if (api_fd_ < 0) start_api();
+    unsigned char rnd[12] = {0};
+    if (FILE *f = fopen("/dev/urandom", "rb")) { if (fread(rnd, 1, sizeof rnd, f) != sizeof rnd) memset(rnd, 0, sizeof rnd); fclose(f); }
+    char tok[32];
+    for (int i = 0; i < 12; i++) snprintf(tok + i * 2, 3, "%02x", rnd[i]);
+    p.token = tok;
+    const std::string data = dir(p.id) + "/root/data";                // the one place the program may write
+    mkdir(data.c_str(), 0755);
+    if (chown(data.c_str(), p.uid, p.uid) != 0) LOGW("plugin %s: no owner for its data folder", p.id.c_str());
+    const std::string url = "http://127.0.0.1:" + std::to_string(api_port_);
+    const std::vector<std::string> env = {"YAM_API_URL=" + url, "YAM_API_TOKEN=" + p.token, "LUNA_API_URL=" + url, "LUNA_API_TOKEN=" + p.token, "UWU_STATE=/data/state.json", "HOME=/data", "PATH=/"};
+    const std::string logp = dir(p.id) + "/plugin.log";
+    struct stat ls{};
+    if (stat(logp.c_str(), &ls) == 0 && ls.st_size > (64 << 10)) unlink(logp.c_str());   // a log that does not grow without end
+    std::vector<std::string> pargs;
+    {
+      std::ifstream af(dir(p.id) + "/args");
+      for (std::string line; std::getline(af, line);)
+        if (!line.empty() && pargs.size() < 16) pargs.push_back(line);
+    }
+    if (access(kFfmpeg, X_OK) == 0) {                                // the one shared ffmpeg of the speaker, in the program's folder as /opt/bin/ffmpeg (a hard link: one copy on the flash)
+      const std::string bindir = dir(p.id) + "/root/opt/bin", target = bindir + "/ffmpeg";
+      mkdir((dir(p.id) + "/root/opt").c_str(), 0755);
+      mkdir(bindir.c_str(), 0755);
+      if (!same_inode(kFfmpeg, target)) {
+        unlink(target.c_str());
+        if (link(kFfmpeg, target.c_str()) != 0) {
+          std::ifstream src(kFfmpeg, std::ios::binary);
+          std::ofstream dst(target, std::ios::binary);
+          dst << src.rdbuf();
+          dst.close();
+          chmod(target.c_str(), 0755);
+        }
+      }
+    }
+    const std::string tmpd = dir(p.id) + "/root/tmp";                // a /tmp of its own inside its folder (programs expect one)
+    mkdir(tmpd.c_str(), 01777);
+    chmod(tmpd.c_str(), 01777);
+    spawned = sandbox_spawn_bin64(dir(p.id) + "/root", p.uid, pargs, env, logp, &p.proc, &err);
+  } else {
+    spawned = sandbox_spawn(dir(p.id) + "/root", p.uid, lim, &p.proc, &err);
+  }
+  if (!spawned) {
     p.detail = "не запустился: " + err;
     state_changed(p.id + "\terror\t" + p.detail);
     return;
@@ -377,6 +447,18 @@ void PluginHost::run(Plugin &p) {
   p.detail = "работает";
   p.inbuf.clear();
   p.gen++;
+  if (p.bin64) {                                                   // a program of a plugin: once it listens, the panel is told on which port its page is
+    const std::string id = p.id;
+    const unsigned gen = p.gen, uid = p.uid;
+    loop_.add_timer(3000, [this, id, gen, uid] {
+      auto it = plugins_.find(id);
+      if (it == plugins_.end() || it->second.gen != gen || it->second.proc.pid <= 0) return;
+      const std::vector<int> ports = listening_ports(uid);
+      if (ports.empty()) return;
+      it->second.detail = "работает, порт " + std::to_string(ports[0]);
+      if (state_changed) state_changed(id + "\trunning\t" + it->second.detail);
+    });
+  }
   p.http_busy = 0;
   p.tools.clear();
   if (p.js && !send_script(p)) {
@@ -606,14 +688,37 @@ void PluginHost::handle(Plugin &p, const std::string &line) {
     if (sscanf(args.c_str(), "%d %n", &sec, &off) < 1 || off <= 0) return reply(p, n, "err arguments");
     if (display) display(args.substr(size_t(off), 12), std::clamp(sec, 1, 30));
     reply(p, n, "ok");
+  } else if (method == "segments") {                               // "<ttl ms> <56 hex digits>": the levels of the 28 segments of the clock
+    if (!need("device.display")) return;
+    int ttl = 0;
+    char hex[80] = {0};
+    if (sscanf(args.c_str(), "%d %79s", &ttl, hex) < 1 || ttl < 0 || ttl > 3600000) return reply(p, n, "err arguments");
+    uint8_t lv[28] = {0};
+    if (ttl > 0) {
+      if (strlen(hex) != 56) return reply(p, n, "err arguments");
+      for (int i = 0; i < 28; i++) {
+        unsigned v = 0;
+        if (sscanf(std::string(hex + i * 2, 2).c_str(), "%2x", &v) != 1) return reply(p, n, "err arguments");
+        lv[i] = uint8_t(v);
+      }
+    }
+    if (clock_segments) clock_segments(lv, ttl);
+    reply(p, n, "ok");
   } else if (method == "media") {
     if (!need("media.control")) return;
+    int pct = 0;
+    if (args.rfind("volume ", 0) == 0 && sscanf(args.c_str() + 7, "%d", &pct) == 1) {   // "volume 0..100"
+      if (set_volume) set_volume(std::clamp(pct, 0, 100));
+      return reply(p, n, "ok");
+    }
     if (args != "play" && args != "pause" && args != "playpause" && args != "next" && args != "previous") return reply(p, n, "err arguments");
     if (media) media(args);
     reply(p, n, "ok");
   } else if (method == "volume") {
     if (!need("device.read")) return;
     reply(p, n, "ok " + std::to_string(volume ? volume() : 0.f));
+  } else if (method == "device") {                                // what the speaker is: nothing secret, no permission
+    reply(p, n, "ok " + (device_info ? device_info() : std::string()) + " plugin=" + p.id);
   } else if (method == "get") {
     if (!need("storage")) return;
     auto it = p.kv.find(args);
@@ -726,9 +831,24 @@ void PluginHost::handle(Plugin &p, const std::string &line) {
     if (!need("audio.play")) return;
     std::map<std::string, std::string> o;
     if (!read_object(args, o) || (o["url"].rfind("http://", 0) != 0 && o["url"].rfind("https://", 0) != 0)) return reply(p, n, "err arguments");
-    if (play_url) play_url(o["url"], o["title"]);
+    if (play_url) play_url(p.id, o["url"], o["title"], o["cover"].rfind("http", 0) == 0 ? o["cover"] : std::string(), o["source"]);
     p.plays = true;
     LOGI("plugin %s plays %s", p.id.c_str(), o["url"].c_str());
+    reply(p, n, "ok");
+  } else if (method == "playfile") {                              // a WAV from the plugin's own folder (the sandbox cannot open it, the firmware can)
+    if (!need("audio.play")) return;
+    const std::string rel = args;
+    bool safe = !rel.empty() && rel.size() < 120 && rel[0] != '/' && rel.find("..") == std::string::npos && rel.find('\n') == std::string::npos;
+    const std::string path = dir(p.id) + "/" + rel;
+    std::ifstream f(path, std::ios::binary);
+    char hdr[12] = {0};
+    if (safe && f) f.read(hdr, 12);
+    struct stat st{};
+    if (!safe || !f || memcmp(hdr, "RIFF", 4) != 0 || memcmp(hdr + 8, "WAVE", 4) != 0 || stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > (64 << 20))
+      return reply(p, n, "err нужен WAV внутри папки плагина (до 64 МБ)");
+    if (play_url) play_url(p.id, "file://" + path, rel, std::string(), "");
+    p.plays = true;
+    LOGI("plugin %s plays file %s", p.id.c_str(), rel.c_str());
     reply(p, n, "ok");
   } else if (method == "stop") {
     if (!need("audio.play")) return;
@@ -750,7 +870,7 @@ void PluginHost::handle(Plugin &p, const std::string &line) {
     if (!read_object(args, o) || o["id"].empty() || o["id"].size() > 40) return reply(p, n, "err arguments");
     const int64_t t = mono_ms();
     results_.erase(std::remove_if(results_.begin(), results_.end(), [t](const Result &r) { return t - r.at > kResultKeepMs; }), results_.end());
-    results_.push_back({p.id, o["id"], json_quote(o["result"].substr(0, 4000)), t});
+    results_.push_back({p.id, o["id"], json_quote(o["result"].substr(0, 12000)), t});   // a page of a plugin for the panel (panel_ui) takes a few KB
     reply(p, n, "ok");
     if (state_changed) state_changed(p.id + "\tresult\t");
     const std::string id = p.id;
@@ -819,6 +939,17 @@ void PluginHost::call(const std::string &id, const std::string &call_id, const s
   (void)!send(it->second.proc.fd, line.data(), line.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
 }
 
+bool PluginHost::transport(const std::string &dir) {
+  const std::string line = "! transport " + dir + "\n";
+  for (auto &kv : plugins_) {
+    Plugin &p = kv.second;
+    if (p.proc.fd < 0 || !p.plays) continue;
+    (void)!send(p.proc.fd, line.data(), line.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
+    return true;
+  }
+  return false;
+}
+
 void PluginHost::event(const std::string &name, const std::string &data) {
   const std::string line = "! " + name + " " + data + "\n";
   for (auto &kv : plugins_) {
@@ -829,9 +960,68 @@ void PluginHost::event(const std::string &name, const std::string &data) {
   }
 }
 
-void PluginHost::install(const std::string &id, const std::string &url, const std::string &sha, const std::string &perms, const std::string &dl, bool js) {
-  if (!valid_id(id) || url.rfind("http://", 0) != 0 || sha.size() != 64 || sha.find_first_not_of("0123456789abcdef") != std::string::npos ||
-      (!dl.empty() && dl.rfind("http://", 0) != 0)) {
+namespace {
+
+bool put_file(const std::string &path, const std::string &data, mode_t mode) {
+  const std::string tmp = path + ".part";
+  const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+  if (fd < 0) return false;
+  size_t off = 0;
+  while (off < data.size()) {
+    const ssize_t n = write(fd, data.data() + off, data.size() - off);
+    if (n <= 0) {
+      close(fd);
+      unlink(tmp.c_str());
+      return false;
+    }
+    off += size_t(n);
+  }
+  close(fd);
+  chmod(tmp.c_str(), mode);
+  return rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+// What the shell script of install() used to do with wget: the program, its sha-256, the files for the signature check, the markers.
+void download_package(std::string d, std::string url, std::string sha, std::string dl, std::string id, bool js) {
+  unlink((d + "/ready").c_str());
+  unlink((d + "/error").c_str());
+  mkdir((d + "/root").c_str(), 0755);
+  auto fail = [&](const char *why) { put_file(d + "/error", std::string(why) + "\n", 0644); };
+  const HttpsResponse r = https_request("GET", url, {}, "", 64u << 20);
+  if (r.status != 200 || r.body.empty()) return fail("не скачался");
+  if (sha256_hex(r.body) != sha) return fail("контрольная сумма не сошлась");
+  static const char *const kTrust[] = {"lostos-signature.json", "manifest.json"}, *const kList[] = {"developers.json", "developers.json.sig"};
+  const std::string trust = d + "/trust";
+  for (const char *f : kTrust) unlink((trust + "/" + f).c_str());
+  for (const char *f : kList) unlink((trust + "/" + f).c_str());
+  rmdir(trust.c_str());
+  if (!dl.empty()) {
+    mkdir(trust.c_str(), 0755);
+    for (const char *f : kTrust) {
+      const HttpsResponse t = https_request("GET", dl + "/" + id + "/trust/" + f, {}, "", 1u << 20);
+      if (t.status == 200) put_file(trust + "/" + f, t.body, 0644);
+    }
+    for (const char *f : kList) {
+      const HttpsResponse t = https_request("GET", dl + "/" + f, {}, "", 1u << 20);
+      if (t.status == 200) put_file(trust + "/" + f, t.body, 0644);
+    }
+  }
+  chmod(d.c_str(), 0755);
+  chmod((d + "/root").c_str(), 0755);
+  if (js) {
+    if (!put_file(d + "/main.js", r.body, 0755)) return fail("не записался");
+  } else {
+    unlink((d + "/main.js").c_str());
+    if (!put_file(d + "/root/plugin", r.body, 0755)) return fail("не записался");
+  }
+  put_file(d + "/ready", "", 0644);
+}
+
+}  // namespace
+
+void PluginHost::install(const std::string &id, const std::string &url, const std::string &sha, const std::string &perms, const std::string &dl, bool js, bool bin64, const std::string &args_b64) {
+  auto web = [](const std::string &u) { return u.rfind("http://", 0) == 0 || u.rfind("https://", 0) == 0; };
+  if (!valid_id(id) || !web(url) || sha.size() != 64 || sha.find_first_not_of("0123456789abcdef") != std::string::npos || (!dl.empty() && !web(dl))) {
     LOGW("plugin install refused: bad arguments");
     return;
   }
@@ -839,6 +1029,7 @@ void PluginHost::install(const std::string &id, const std::string &url, const st
   p.id = id;
   p.name = id;
   p.js = js;
+  p.bin64 = bin64;
   for (const std::string &g : split(perms, ','))
     for (const char *k : kKnownPermissions)
       if (g == k) p.asked.push_back(g);
@@ -850,28 +1041,14 @@ void PluginHost::install(const std::string &id, const std::string &url, const st
   if (plugins_.count(id)) halt(plugins_[id]);
   mkdir(kRoot, 0755);
   mkdir(dir(id).c_str(), 0755);
+  if (bin64) put_file(dir(id) + "/bin64", "", 0644);
+  if (bin64) put_file(dir(id) + "/args", args_b64.empty() ? std::string() : b64_decode(args_b64), 0644);   // [launch] args of the package, one per line
+  else unlink((dir(id) + "/bin64").c_str());
   plugins_[id] = p;
   save(p);
-  pid_t pid = fork();
-  if (pid == 0) {
-    if (fork() == 0) {
-      setsid();
-      for (int fd = 3; fd < 1024; fd++) close(fd);
-      const int nul = open("/dev/null", O_RDWR);
-      dup2(nul, 0), dup2(nul, 1), dup2(nul, 2);
-      const char *script =
-          "d=$1; rm -f \"$d/ready\" \"$d/error\"; mkdir -p \"$d/root\" && wget -q -T 30 -O \"$d/root/plugin.tmp\" \"$2\" || { echo 'не скачался' > \"$d/error\"; exit 1; };"
-          "got=$(sha256sum \"$d/root/plugin.tmp\" | cut -d' ' -f1); [ \"$got\" = \"$3\" ] || { rm -f \"$d/root/plugin.tmp\"; echo 'контрольная сумма не сошлась' > \"$d/error\"; exit 1; };"
-          "rm -rf \"$d/trust\"; if [ -n \"$4\" ]; then mkdir -p \"$d/trust\"; "
-          "for f in lostos-signature.json manifest.json; do wget -q -T 20 -O \"$d/trust/$f\" \"$4/$5/trust/$f\" || rm -f \"$d/trust/$f\"; done; "
-          "for f in developers.json developers.json.sig; do wget -q -T 20 -O \"$d/trust/$f\" \"$4/$f\" || rm -f \"$d/trust/$f\"; done; fi; "
-          "chmod 755 \"$d\" \"$d/root\" \"$d/root/plugin.tmp\"; if [ \"$6\" = js ]; then mv \"$d/root/plugin.tmp\" \"$d/main.js\"; else rm -f \"$d/main.js\"; "
-          "mv \"$d/root/plugin.tmp\" \"$d/root/plugin\"; fi; : > \"$d/ready\"";
-      execl("/bin/sh", "sh", "-c", script, "sh", dir(id).c_str(), url.c_str(), sha.c_str(), dl.c_str(), id.c_str(), js ? "js" : "bin", static_cast<char *>(nullptr));
-    }
-    _exit(0);
-  }
-  if (pid > 0) waitpid(pid, nullptr, 0);
+  // The program is fetched by a thread of ours (https_request: http:// and https://), checked against the sha-256 that the server gave, and put where the old shell script put it;
+  // the poll below watches the same marker files "ready" and "error".
+  std::thread(download_package, dir(id), url, sha, dl, id, js).detach();
   if (state_changed) state_changed(id + "\tdownloading\t");
   auto tries = std::make_shared<int>(0);
   auto poll = std::make_shared<std::function<void()>>();
@@ -907,7 +1084,8 @@ void PluginHost::command(const std::string &line) {
     system_.set_enabled(w[1], w[0] == "enable");   // no permissions to grant: the system plugins are the system
     if (state_changed) state_changed(w[1] + "\t" + (w[0] == "enable" ? "running" : "off") + "\t");
   } else if (w[0] == "install" && w.size() >= 4) {
-    install(w[1], w[2], w[3], w.size() > 4 && w[4] != "-" ? w[4] : "", w.size() > 5 && w[5] != "-" ? w[5] : "", w.size() > 6 && w[6] == "js");
+    install(w[1], w[2], w[3], w.size() > 4 && w[4] != "-" ? w[4] : "", w.size() > 5 && w[5] != "-" ? w[5] : "", w.size() > 6 && w[6] == "js", w.size() > 6 && w[6] == "bin64", w.size() > 7 ? w[7] : std::string());
+
   } else if (w[0] == "call" && w.size() >= 4) {
     call(w[1], w[2], w[3]);
   } else if (w[0] == "remove" && w.size() >= 2 && valid_id(w[1])) {
@@ -952,6 +1130,162 @@ std::string PluginHost::status() const {
   for (const Result &r : results_)
     if (t - r.at <= kResultKeepMs) o += r.plugin + "\tresult\t" + r.id + "\t" + r.json + "\n";
   return o + system_.plugin_lines();
+}
+
+
+// ---------------------------------------------------------------- the local API of programs of Luna (127.0.0.1, a token per plugin)
+void PluginHost::start_api() {
+  if (api_fd_ >= 0) return;
+  const int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  if (fd < 0) return;
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  a.sin_port = 0;
+  socklen_t len = sizeof a;
+  if (bind(fd, reinterpret_cast<sockaddr *>(&a), sizeof a) != 0 || listen(fd, 8) != 0 || getsockname(fd, reinterpret_cast<sockaddr *>(&a), &len) != 0) {
+    close(fd);
+    return;
+  }
+  api_fd_ = fd;
+  api_port_ = ntohs(a.sin_port);
+  loop_.add_fd(fd, EPOLLIN, [this](uint32_t) { api_accept(); });
+  LOGI("plugin API for programs on 127.0.0.1:%u", api_port_);
+}
+
+void PluginHost::api_accept() {
+  for (;;) {
+    const int c = accept4(api_fd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if (c < 0) return;
+    if (api_conns_.size() >= 16) {
+      close(c);
+      continue;
+    }
+    api_conns_[c];
+    loop_.add_fd(c, EPOLLIN, [this, c](uint32_t) { api_read(c); });
+  }
+}
+
+void PluginHost::api_close(int fd) {
+  loop_.del_fd(fd);
+  close(fd);
+  api_conns_.erase(fd);
+}
+
+void PluginHost::api_read(int fd) {
+  auto it = api_conns_.find(fd);
+  if (it == api_conns_.end()) return;
+  std::string &b = it->second;
+  char buf[2048];
+  for (;;) {
+    const ssize_t n = recv(fd, buf, sizeof buf, MSG_DONTWAIT);
+    if (n > 0) {
+      b.append(buf, size_t(n));
+      if (b.size() > 16384) return api_close(fd);
+      continue;
+    }
+    if (n == 0 || (errno != EAGAIN && errno != EINTR)) return api_close(fd);
+    break;
+  }
+  const size_t he = b.find("\r\n\r\n");
+  if (he == std::string::npos) return;
+  std::string head = b.substr(0, he), lower = head;
+  for (char &ch : lower) ch = char(tolower((unsigned char)ch));
+  size_t clen = 0;
+  const size_t cl = lower.find("content-length:");
+  if (cl != std::string::npos) clen = size_t(strtoul(head.c_str() + cl + 15, nullptr, 10));
+  if (clen > 12000) return api_close(fd);
+  if (b.size() < he + 4 + clen) return;                             // the body has not come whole yet
+  std::string token;
+  for (const char *h : {"x-yam-token:", "x-luna-token:"}) {
+    const size_t k = lower.find(h);
+    if (k == std::string::npos) continue;
+    size_t from = k + strlen(h), to = head.find("\r\n", from);
+    token = head.substr(from, to == std::string::npos ? std::string::npos : to - from);
+    while (!token.empty() && token.front() == ' ') token.erase(token.begin());
+    while (!token.empty() && (token.back() == ' ' || token.back() == '\r')) token.pop_back();
+  }
+  const size_t sp1 = head.find(' '), sp2 = head.find(' ', sp1 + 1);
+  const std::string method = sp1 == std::string::npos ? "" : head.substr(0, sp1);
+  std::string path = sp2 == std::string::npos ? "" : head.substr(sp1 + 1, sp2 - sp1 - 1);
+  if (const size_t q = path.find('?'); q != std::string::npos) path.erase(q);
+  int code = 200;
+  const std::string body = api_handle(method, path, token, b.substr(he + 4, clen), &code);
+  const char *text = code == 200 ? "OK" : code == 401 ? "Unauthorized" : code == 403 ? "Forbidden" : code == 404 ? "Not Found" : "Bad Request";
+  const std::string out = "HTTP/1.1 " + std::to_string(code) + " " + text + "\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+  send(fd, out.data(), out.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
+  api_close(fd);
+}
+
+std::string PluginHost::api_handle(const std::string &method, const std::string &path, const std::string &token, const std::string &body, int *code) {
+  Plugin *pp = nullptr;
+  if (!token.empty())
+    for (auto &kv : plugins_)
+      if (kv.second.bin64 && kv.second.proc.pid > 0 && kv.second.token == token) pp = &kv.second;
+  if (!pp) {
+    *code = 401;
+    return "{\"error\":\"token\"}";
+  }
+  // what the speaker is, in the names of Luna ("yandexmini3"), and the Lite 2 counts its digits from 0
+  std::string model = "bergamot", info = device_info ? device_info() : std::string();
+  if (const size_t m = info.find("model="); m != std::string::npos) model = info.substr(m + 6, info.find(' ', m) - m - 6);
+  static const char *const kNames[][2] = {{"bergamot", "yandexmini3"}, {"plum", "yandexplum"}, {"cucumber", "yandexmidi"}, {"station-mini2", "yandexmini_2"},
+                                          {"station-micro", "yandexmicro"}, {"tulip-d1", "yandexstation"}};
+  std::string luna = model;
+  for (const auto &n : kNames)
+    if (model == n[0]) luna = n[1];
+  const bool clock = info.find("clock=1") != std::string::npos;
+  if (method == "GET" && path == "/device") {
+    std::string f = "\"audio.volume.alsa\",\"input.evdev\"";
+    if (info.find("ring=0") == std::string::npos) f += ",\"led.ring.rgb\"";
+    if (clock) f += ",\"display.clock.segment.v1\"";
+    return "{\"model\":\"" + luna + "\",\"architecture\":\"aarch64\",\"features\":[" + f + "]}";
+  }
+  if (method == "POST" && path == "/clock") {
+    if (!allowed(*pp, "device.display")) {
+      *code = 403;
+      return "{\"error\":\"permission\"}";
+    }
+    if (!clock) {
+      *code = 400;
+      return "{\"error\":\"no clock\"}";
+    }
+    const size_t off = body.find("\"off\"");
+    if (off != std::string::npos && body.find("true", off) != std::string::npos) {
+      uint8_t zero[28] = {0};
+      if (clock_segments) clock_segments(zero, 0);
+      return "{}";
+    }
+    const size_t k = body.find("\"segments\"");
+    if (k != std::string::npos) {
+      const int base = luna.find("plum") != std::string::npos ? 0 : 1;
+      uint8_t lv[28] = {0};
+      size_t o = body.find('{', k), e = o == std::string::npos ? o : body.find('}', o);
+      for (size_t i = o; e != std::string::npos && i < e;) {
+        const size_t q1 = body.find('"', i);
+        if (q1 == std::string::npos || q1 >= e) break;
+        const size_t q2 = body.find('"', q1 + 1);
+        if (q2 == std::string::npos || q2 >= e) break;
+        const std::string name = body.substr(q1 + 1, q2 - q1 - 1);
+        const size_t colon = body.find(':', q2);
+        if (colon == std::string::npos || colon >= e) break;
+        const long v = strtol(body.c_str() + colon + 1, nullptr, 10);
+        i = body.find(',', colon) == std::string::npos ? e : body.find(',', colon) + 1;
+        if (name.size() == 2 && toupper((unsigned char)name[0]) >= 'A' && toupper((unsigned char)name[0]) <= 'G' && name[1] >= '0' && name[1] <= '9') {
+          const int d = (name[1] - '0') - base;
+          if (d >= 0 && d < 4) lv[d * 7 + (toupper((unsigned char)name[0]) - 'A')] = uint8_t(std::clamp<long>(v, 0, 255));
+        }
+      }
+      if (clock_segments) clock_segments(lv, 600);                 // a program sends the next frame within a fraction of a second; when it stops the clock comes back
+      return "{}";
+    }
+    *code = 400;
+    return "{\"error\":\"segments or off\"}";
+  }
+  *code = 404;
+  return "{\"error\":\"not here\"}";
 }
 
 }  // namespace cs

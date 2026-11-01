@@ -117,10 +117,12 @@
     led: (r, g, b, seconds = 3) => call("led", `${r | 0} ${g | 0} ${b | 0} ${seconds | 0}`),
     display: (text, seconds = 3) => call("display", `${seconds | 0} ${text}`),
     media: (cmd) => call("media", cmd),
-    play: (url, opts = {}) => call("play", JSON.stringify({ url: String(url), title: String(opts.title || "") })),
+    play: (url, opts = {}) => call("play", JSON.stringify({ url: String(url), title: String(opts.title || ""), cover: String(opts.cover || ""), source: String(opts.source || "") })),
     stop: () => call("stop"),
     volume: async () => Number(await call("volume")),
     publish: (topic, text = "") => call("publish", `${topic} ${text}`),
+    // what this speaker is: {model, ring, logo, clock, microphone} (numbers; clock and microphone 0/1), no permission needed
+    device: async () => Object.fromEntries((await call("device")).split(" ").filter(Boolean).map((kv) => { const i = kv.indexOf("="); const v = kv.slice(i + 1); return [kv.slice(0, i), /^\d+$/.test(v) ? Number(v) : v]; })),
     storage: Object.freeze({
       get: async (key) => { const v = await call("get", key); return v === "" ? null : v; },
       set: (key, value) => call("set", `${key} ${value}`),

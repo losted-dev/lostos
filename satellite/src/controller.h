@@ -2,6 +2,7 @@
 // Voice-satellite behaviour follows OHF linux-voice-assistant (satellite.py).
 #pragma once
 
+#include <atomic>
 #include <deque>
 
 #include <map>
@@ -50,6 +51,7 @@ struct Settings {
   std::string clock_eq = "On track change";  // Off | On track change | Always
   std::string music_viz = "All styles";  // one of Leds::music_styles()
   float led_speed = 1;             // 0.25..4
+  bool clock_autodim = true;      // the clock dims by the light sensor (off: the brightness the user chose, always)
   bool alice_button = true;       // the centre button starts the assistant (off: it does not; the other actions of the button stay)
   bool cover_lookup = true;       // the panel may look the cover of an AirPlay / Bluetooth track up online (artist and title leave the house)
   bool lyrics = false;            // the panels show synced lyrics in the player (kept here so every panel agrees)
@@ -174,9 +176,17 @@ class Controller : public ApiHooks {
   bool hw_mic_muted_ = false;
   bool prev_air_session_ = false, prev_air_playing_ = false;
   int64_t spotify_stopped_ms_ = 0;   // when Spotify last went quiet; 10+ minutes later "play" starts fresh music
+  int64_t spotify_user_pause_ms_ = 0;   // when WE paused Spotify (a voice command, a key, the panel) and nothing played / skipped it since: a start that follows on its own is logged
   const char *spotify_play_event(bool double_tap) const;
   int skip_dir_ = 1;           // direction of the last skip command (+1 next, -1 previous)
   int64_t skip_ms_ = 0;
+  // what a plugin plays on the music channel (an internet radio): its id, its name for the source, the title and the picture
+  std::string stream_plugin_, stream_label_, stream_title_, stream_cover_, stream_artist_;
+  uint32_t stream_dur_ms_ = 0, stream_offset_ms_ = 0;   // the offset: the place of the track where the stream starts (a jump in a track starts it again from there)    // the length of the stream that a plugin of the server named (0: unknown)
+  bool stream_server_ = false;   // the stream was named by a plugin of the server (its buttons «вперёд» / «назад» go there)
+  bool stream_active() const;
+  void play_plugin_stream(const std::string &plugin, const std::string &url, const std::string &title, const std::string &cover, const std::string &source,
+                          const std::string &artist = "", bool from_server = false, uint32_t dur_ms = 0, uint32_t offset_ms = 0);
   std::string last_air_track_;   // the previous AirPlay track text: a different one means the track changed by itself
   void track_change(int dir);  // display: bars sweep, then the equalizer
   int64_t last_music_ms_ = 0;     // last music state change / button use: the centre button stays a play/pause key for a minute
@@ -235,6 +245,13 @@ class Controller : public ApiHooks {
   std::string last_wifi_;
   bool barge_enabled_ = false;   // the microphone stays open while she talks, the server may cut her short
   std::vector<int16_t> pre_wake_;   // 5 s of audio up to the wake word, sent in front of the dialog
+  // The voiceprint of the person who spoke: what is said after the wake word is kept (up to 20 s), and when she stops listening a worker thread turns it into a
+  // vector with the models of the speaker's own firmware; the server takes it in place of its own (heavy) engine.
+  std::vector<int16_t> utt_pcm_;
+  bool utt_open_ = false;
+  std::atomic<bool> vp_busy_{false};
+  uint32_t vp_seq_ = 0;
+  void voiceprint_flush();
   // ONE place that drives the music: what the buttons, the swipes and the voice commands do (see Controller::transport).
   enum class Transport { PLAYPAUSE, PAUSE, PLAY, NEXT, PREV };
   enum class MusicTarget { NONE, AIRPLAY, SPOTIFY, BT };

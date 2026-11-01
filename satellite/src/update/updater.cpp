@@ -162,7 +162,9 @@ bool release_newer(const std::string &latest, const std::string &current, bool *
 }
 
 const char *Updater::arch() {
-#if defined(__aarch64__)
+#if defined(__ANDROID__)
+  return "android";  // Station 1: a bionic build, not the Linux aarch64 one
+#elif defined(__aarch64__)
   return "aarch64";
 #elif defined(__arm__)
   return "armhf";

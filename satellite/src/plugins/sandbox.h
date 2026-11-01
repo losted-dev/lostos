@@ -14,6 +14,7 @@
 
 #include <string>
 #include <sys/types.h>
+#include <vector>
 
 namespace cs {
 
@@ -31,6 +32,11 @@ struct SandboxProc {
 
 // Starts `<root>/plugin` in the sandbox as user id `uid`. root must hold the program, readable and executable by uid.
 bool sandbox_spawn(const std::string &root, unsigned uid, const SandboxLimits &limits, SandboxProc *out, std::string *error);
+
+// A native 64-bit program the owner chose to run (the plugins written for Luna): the same chroot into its folder, its own unprivileged user, no capabilities, rlimits,
+// but no system-call filter and with the network and threads (it is a server and a client). Only for a package the owner allowed to run programs (host.cpp).
+// `env` is a list of "NAME=value"; its output goes to log_path. Starts `<root>/plugin`; fd 3 stays open in it so that its end shows to the firmware (the fd of SandboxProc).
+bool sandbox_spawn_bin64(const std::string &root, unsigned uid, const std::vector<std::string> &args, const std::vector<std::string> &env, const std::string &log_path, SandboxProc *out, std::string *error);
 
 // "killed by a forbidden system call", "out of CPU time", ... for a wait status; empty when the exit was clean.
 std::string sandbox_describe_exit(int wait_status);

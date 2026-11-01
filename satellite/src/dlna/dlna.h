@@ -23,7 +23,7 @@ class DlnaRenderer {
   ~DlnaRenderer();
 
   // Listens on `port` (HTTP) and announces itself over SSDP. uuid is "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".
-  bool start(const std::string &friendly_name, const std::string &uuid, uint16_t port);
+  bool start(const std::string &friendly_name, const std::string &uuid, uint16_t port, const std::string &model_name = "Station");   // model_name: what the descriptor says about the model of this speaker
 
   std::function<Now()> get_now;
   std::function<void(const std::string &)> on_action;  // "play" | "pause" | "stop" | "next" | "previous"

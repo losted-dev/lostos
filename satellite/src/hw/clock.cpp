@@ -194,7 +194,7 @@ struct Clock::Impl {
   unsigned refreshes = 0;
 
   struct Content {
-    enum Kind { NONE, TEXT, FACE, ANIM, SWEEP, EQ, PAUSE, BOOT } kind = NONE;
+    enum Kind { NONE, TEXT, FACE, ANIM, SWEEP, EQ, PAUSE, BOOT, RAW } kind = NONE;
     std::vector<Cell> cells;  // TEXT
     int face = -1;            // FACE: index into face_names()
     int64_t since = 0;        // origin of scroll / animation phase
@@ -206,6 +206,7 @@ struct Clock::Impl {
     bool pingpong = false;    // SWEEP: runs left and right again and again (a ringing timer / alarm)
     int then_eq_ms = 0;       // SWEEP: equalizer for this long afterwards
     bool decay = false;       // EQ: bars fall to nothing (pause)
+    float raw[kDigits][kSegs] = {};   // RAW: the level 0..1 of every segment, drawn by a plugin
   };
   // Equalizer on the display: 8 bands -> 4 digits, three levels per digit (bottom, middle, top bar).
   std::array<float, 8> eq_t{}, eq_cur{};
@@ -388,7 +389,8 @@ struct Clock::Impl {
     return s >= 1.f ? 1.f : s * s * (3.f - 2.f * s);  // smoothstep
   }
 
-  float ambient() const { return dimmer.factor(); }  // 0.02..1, 1 while lux is unknown
+  bool auto_dim = true;   // the light sensor dims the display (off: the brightness the user chose, always)
+  float ambient() const { return auto_dim ? dimmer.factor() : 1.f; }  // 0.02..1, 1 while lux is unknown
 
   void apply_level() {
     int lvl = int(std::lround(255.f * user_bri * ambient()));
@@ -567,7 +569,7 @@ struct Clock::Impl {
         overlay = e;
       } else {
         if (overlay.kind == Content::ANIM || overlay.kind == Content::SWEEP || overlay.kind == Content::EQ || overlay.kind == Content::PAUSE || overlay.kind == Content::BOOT ||
-            overlay.kind == Content::FACE)
+            overlay.kind == Content::FACE || overlay.kind == Content::RAW)
           clock_fade_from = now;  // fade the clock in instead of cutting to it
         overlay = {};
       }
@@ -607,6 +609,9 @@ struct Clock::Impl {
         const float in = std::min(1.f, float(now - c->fade_from) / float(kAnimFadeInMs));
         const float out = c == &overlay ? std::max(0.f, std::min(1.f, float(overlay_until - now) / float(kAnimFadeOutMs))) : 1.f;
         anim_scale = in * out;
+      } else if (c->kind == Content::RAW) {
+        memcpy(lv, c->raw, sizeof lv);
+        levels = true;
       } else if (c->kind == Content::SWEEP || c->kind == Content::EQ || c->kind == Content::PAUSE || c->kind == Content::BOOT) {
         if (c->kind == Content::BOOT) {
           render_boot(*c, now, lv);
@@ -729,6 +734,12 @@ void Clock::set_enabled(bool on) {
 
 void Clock::set_brightness(float b) {
   impl_->user_bri = std::max(0.f, std::min(1.f, b));
+  impl_->apply_level();
+  impl_->refresh();
+}
+
+void Clock::set_auto_dim(bool on) {
+  impl_->auto_dim = on;
   impl_->apply_level();
   impl_->refresh();
 }
@@ -994,6 +1005,30 @@ void Clock::show_temporary_anim(const std::string &program, int seconds) {
   // switching straight from one animation to another keeps the brightness (no dip to dark)
   c.fade_from = d.overlay.kind == Impl::Content::ANIM && now < d.overlay_until ? now - kAnimFadeInMs : now;
   d.overlay_until = now + std::min<int64_t>(seconds > 0 ? seconds : 5, kTemporaryMaxS) * 1000;
+  d.overlay = std::move(c);
+  d.clock_fade_from = 0;
+  d.refresh();
+  d.schedule_anim();
+}
+
+// A frame drawn by a plugin (Luna's alice.clock.segments): `levels` are 28 values 0..255 (digit by digit, segments a b c d e f g). It holds for ttl_ms (the plugin sends the
+// next frame before that; when it stops the clock fades back in). ttl_ms <= 0 takes the frame away. The assistant's own animation (listening, thinking, speaking) is not painted over.
+void Clock::show_segments(const uint8_t *levels, int ttl_ms) {
+  auto &d = *impl_;
+  const int64_t now = Loop::now_ms();
+  if (ttl_ms <= 0) {
+    if (d.overlay.kind == Impl::Content::RAW) d.overlay_until = now;
+    d.refresh();
+    d.schedule_anim();
+    return;
+  }
+  if (d.overlay.kind == Impl::Content::ANIM && now < d.overlay_until) return;
+  Impl::Content c;
+  c.kind = Impl::Content::RAW;
+  c.since = now;
+  for (int dig = 0; dig < kDigits; dig++)
+    for (int sg = 0; sg < kSegs; sg++) c.raw[dig][sg] = float(levels[dig * kSegs + sg]) / 255.f;
+  d.overlay_until = now + std::min<int64_t>(ttl_ms, kTemporaryMaxS * 1000);
   d.overlay = std::move(c);
   d.clock_fade_from = 0;
   d.refresh();

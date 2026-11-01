@@ -170,7 +170,7 @@ bool on_verified_list(const std::string &dir, const std::string &pub, int64_t no
 }  // namespace
 
 bool dangerous_permission(const std::string &perm) {
-  return perm == "network.connect" || perm == "network.listen" || perm == "audio.play" || perm == "assistant.intercept" || perm == "events.publish";
+  return perm == "network.connect" || perm == "network.listen" || perm == "audio.play" || perm == "assistant.intercept" || perm == "events.publish" || perm == "exec.bin64";
 }
 
 std::vector<std::string> permissions_to_grant(const std::vector<std::string> &asked, const PluginTrust &t) {

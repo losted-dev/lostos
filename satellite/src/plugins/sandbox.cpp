@@ -163,6 +163,54 @@ bool sandbox_spawn(const std::string &root, unsigned uid, const SandboxLimits &l
   return true;
 }
 
+bool sandbox_spawn_bin64(const std::string &root, unsigned uid, const std::vector<std::string> &args, const std::vector<std::string> &env, const std::string &log_path, SandboxProc *out, std::string *error) {
+  int sv[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0) {
+    if (error) *error = "socketpair";
+    return false;
+  }
+  const pid_t pid = fork();
+  if (pid < 0) {
+    close(sv[0]);
+    close(sv[1]);
+    if (error) *error = "fork";
+    return false;
+  }
+  if (pid == 0) {
+    const int nul = open("/dev/null", O_RDWR);
+    const int logfd = log_path.empty() ? -1 : open(log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);   // before the chroot: the program writes its messages there
+    dup2(nul, 0);
+    dup2(logfd >= 0 ? logfd : nul, 1);
+    dup2(logfd >= 0 ? logfd : nul, 2);
+    dup2(sv[1], 3);
+    for (int fd = 4; fd < 1024; fd++) close(fd);
+    fcntl(3, F_SETFD, 0);
+    if (chroot(root.c_str()) != 0) _exit(120);
+    if (chdir("/data") != 0 && chdir("/") != 0) _exit(120);
+    limit(RLIMIT_NOFILE, 256);
+    limit(RLIMIT_NPROC, 128);
+    limit(RLIMIT_FSIZE, 16u << 20);
+    limit(RLIMIT_CORE, 0);
+    if (setgroups(0, nullptr) != 0 || setresgid(uid, uid, uid) != 0 || setresuid(uid, uid, uid) != 0) _exit(121);
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(122);
+    prctl(PR_SET_PDEATHSIG, SIGKILL);                          // after the change of user (it clears this): the firmware ends or restarts, the program ends with it and does not hold its port
+    if (getppid() == 1) _exit(125);                            // the firmware is already gone
+    std::vector<char *> envp;
+    for (const std::string &e : env) envp.push_back(const_cast<char *>(e.c_str()));
+    envp.push_back(nullptr);
+    std::vector<char *> argv;
+    argv.push_back(const_cast<char *>("/plugin"));
+    for (const std::string &a : args) argv.push_back(const_cast<char *>(a.c_str()));
+    argv.push_back(nullptr);
+    execve("/plugin", argv.data(), envp.data());
+    _exit(124);
+  }
+  close(sv[1]);
+  out->pid = pid;
+  out->fd = sv[0];
+  return true;
+}
+
 std::string sandbox_describe_exit(int st) {
   if (WIFSIGNALED(st)) {
     switch (WTERMSIG(st)) {

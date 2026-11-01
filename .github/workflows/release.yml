@@ -1,4 +1,4 @@
-# A tag vMAJOR.MINOR.PATCH builds the daemon for both architectures and prepares a DRAFT release: lostos-armhf.bin, lostos-aarch64.bin, SHA256SUMS and the installers.
+# A tag vMAJOR.MINOR.PATCH builds the daemon for both architectures and prepares a DRAFT release: lostos-armhf.bin, lostos-aarch64.bin, lostos-android.bin (Station 1), SHA256SUMS and the installers.
 # Nothing is published by the robot: a person reads the draft and presses "Publish". "releases/latest" (what the installer and the speakers ask for) is the newest PUBLISHED release
 # that is not a pre-release: a tag with a dash (v0.4.0-rc1) becomes a pre-release and is passed over by everybody who did not ask for it with --version.
 # Speakers and the installer check lostos-<arch>.bin against the SHA256SUMS of the same release (no signature for the firmware: the protection is that of the repository, keep
@@ -32,6 +32,11 @@ jobs:
           # one architecture after the other: both fetch the same third-party sources and a parallel run makes them delete each other's checkout
           make -C satellite armhf -j"$(nproc)"
           make -C satellite aarch64 -j"$(nproc)"
+      - name: Build the daemon for Android (Station 1; NDK r27c, the version it is tested with)
+        run: |
+          curl -fsSL -o ndk.zip https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q ndk.zip 'android-ndk-r27c/toolchains/llvm/*' 'android-ndk-r27c/source.properties' && rm ndk.zip
+          make -C satellite ARCH=android NDK="$PWD/android-ndk-r27c" binary -j"$(nproc)"
       - name: Build the runtime of the JavaScript plugins (one static ARM program for every speaker)
         run: sh satellite/plugin-runtime/build.sh satellite/build/plugin-runtime arm-linux-musleabihf
       - name: Files of the release
@@ -39,8 +44,9 @@ jobs:
           mkdir out
           cp satellite/build/armhf/lostos out/lostos-armhf.bin
           cp satellite/build/aarch64/lostos out/lostos-aarch64.bin
+          cp satellite/build/android/lostos out/lostos-android.bin
           cp satellite/build/plugin-runtime/lostos-js-arm-linux-musleabihf out/lostos-js-armhf.bin
-          (cd out && sha256sum lostos-armhf.bin lostos-aarch64.bin lostos-js-armhf.bin > SHA256SUMS && cat SHA256SUMS)
+          (cd out && sha256sum lostos-armhf.bin lostos-aarch64.bin lostos-android.bin lostos-js-armhf.bin > SHA256SUMS && cat SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with: { name: firmware, path: out/ }
   installer:

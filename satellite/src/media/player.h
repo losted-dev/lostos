@@ -38,11 +38,15 @@ class Player {
   // Plays urls sequentially (http(s)://, file://, or absolute path). Replaces current playback on the channel.
   // MUSIC retries an http(s) url that fails for network reasons (3 times, 1/2/4 s apart, resuming
   // at the position reached) before moving on; local files and ANNOUNCE fail at once.
-  void play(Channel ch, std::vector<std::string> urls, DoneCb done = nullptr);
+  // live: an internet radio stream, played without the buffering pause (its queue never reports 100 %, the connection then stalls with a full socket)
+  void play(Channel ch, std::vector<std::string> urls, DoneCb done = nullptr, bool live = false);
   void pause(Channel ch);
   void resume(Channel ch);
   void stop(Channel ch);
   PlayState state(Channel ch) const;
+  // The position of the stream that plays on the channel (ms), -1 when the pipeline does not say; and a jump to a position (a file or a stream that can be sought).
+  int64_t position_ms(Channel ch) const;
+  bool seek_ms(Channel ch, int64_t ms);
 
   // Per-channel gain 0..1 (used for ducking MUSIC while listening/speaking).
   void set_channel_gain(Channel ch, float gain);

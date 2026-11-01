@@ -46,6 +46,10 @@ while time.time() < end and answer is None:
                 fw.sendall(("! tool " + json.dumps({"id": "t1", "name": tool, "args": tool_args}, ensure_ascii=False) + "\n").encode())
             if n == "0":
                 continue
+        elif method == "device":
+            out = "ok model=bergamot ring=6 logo=0 clock=1 microphone=1"
+        elif method == "volume":
+            out = "ok 0.3"
         elif method == "get":
             out = "ok " + kv[a] if a in kv else "ok"
         elif method == "set":

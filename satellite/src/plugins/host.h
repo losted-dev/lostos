@@ -57,10 +57,15 @@ class PluginHost {
   std::function<void(const std::string &text, int seconds)> display;
   std::function<void(const std::string &cmd)> media;
   std::function<float()> volume;
+  std::function<void(const uint8_t *levels, int ttl_ms)> clock_segments;   // a frame of 28 segment levels on the clock (device.display)
+  std::function<void(int percent)> set_volume;                    // a plugin sets the volume (0..100), with media.control
+  std::function<std::string()> device_info;                       // "key=value ..." of what this speaker has (model, ring, logo, clock): the plugin API `device`
   std::function<void(const std::string &topic, const std::string &text)> publish;
   std::function<void(bool claimed)> button_claim;                  // a plugin took / gave back the centre button (the Alice button)
   std::function<void(bool playing)> audio_state;                  // a plugin started / stopped playing sound (a source of the media hub)
-  std::function<void(const std::string &url, const std::string &title)> play_url;   // a plugin asks the music player to play a stream
+  // a plugin asks the music player to play a stream; title, cover (a picture) and source (its own name for the source, "Радио") are what
+  // «Сейчас играет» shows, plugin is its id (the panel asks that plugin for its player menu)
+  std::function<void(const std::string &plugin, const std::string &url, const std::string &title, const std::string &cover, const std::string &source)> play_url;
   std::function<void()> stop_url;
   std::function<void(const std::string &line)> state_changed;   // a one-line status for the panel ("id\tstate\tdetail")
 
@@ -69,6 +74,9 @@ class PluginHost {
   // "call <id> <call id> <base64 of {"name","args"}>" (a command of the plugin, for the voice assistant): from the voice server
   void command(const std::string &line);
   void event(const std::string &name, const std::string &data);    // to the plugins that subscribed
+  // "next" / "previous" from the buttons, the panel or Home Assistant to the plugin whose stream plays (the radio switches the station);
+  // false when no plugin plays. Needs no subscription: the plugin asked for the music channel itself (audio.play).
+  bool transport(const std::string &dir);
   void audio_stop();                                               // another source took the speaker: the sound of the plugins stops
   std::string status() const;                                      // "id<TAB>state<TAB>detail" per line
 
@@ -90,6 +98,8 @@ class PluginHost {
     std::map<std::string, std::string> kv;
     bool claims_button = false;                                   // this plugin holds the centre button
     pid_t aplay = -1;                                             // the player of the sound this plugin sends
+    bool bin64 = false;                                           // a native 64-bit program (a plugin written for Luna): runs only when the owner allowed programs
+    std::string token;                                            // its token for the local API (YAM_API_TOKEN), made at every start
     bool js = false;                                              // a JavaScript plugin: main.js in its folder, the shared runtime as its program
     unsigned gen = 0;                                             // counts the starts: an HTTP answer for an earlier run is dropped
     int http_busy = 0;                                            // its requests in flight
@@ -117,11 +127,20 @@ class PluginHost {
   void stopped(Plugin &p);
   void halt(Plugin &p);
   bool allowed(const Plugin &p, const std::string &perm) const;
-  void install(const std::string &id, const std::string &url, const std::string &sha, const std::string &perms, const std::string &dl, bool js = false);
+  void install(const std::string &id, const std::string &url, const std::string &sha, const std::string &perms, const std::string &dl, bool js = false, bool bin64 = false, const std::string &args_b64 = "");
   void trust(Plugin &p);                                           // checks the signature of the package here (trust.h) and sets what the plugin is granted
   void http(Plugin &p, const std::string &n, const std::string &args);
   void call(const std::string &id, const std::string &call_id, const std::string &b64);
   bool send_script(Plugin &p);
+  // the local API that programs of Luna talk to (GET /device, POST /clock), on 127.0.0.1, with a token per plugin
+  int api_fd_ = -1;
+  unsigned api_port_ = 0;
+  std::map<int, std::string> api_conns_;
+  void start_api();
+  void api_accept();
+  void api_read(int fd);
+  void api_close(int fd);
+  std::string api_handle(const std::string &method, const std::string &path, const std::string &token, const std::string &body, int *code);
   std::vector<std::string> allowed_for(const Plugin &p, const std::vector<std::string> &asked) const;   // what the speaker grants of what the server asks
 };
 

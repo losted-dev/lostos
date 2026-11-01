@@ -9,6 +9,7 @@
 //     __host.timer(ms, repeat) -> id, __host.clear(id)   timers; when one is due, globalThis.__timer(id) runs
 //     __host.now() -> ms since the start
 // and events "! <name> <data>" from the firmware are handed to globalThis.__event(name, data).
+// A script that starts with "--lua" is Lua 5.4 instead (lua-mode.c, prelude.lua): the plugins written for the Luna framework.
 // Limits of its own on top of the sandbox's: 24 MB of JavaScript heap, a job that runs for more than 5 s is interrupted.
 #define _GNU_SOURCE
 #include <errno.h>
@@ -293,6 +294,8 @@ static JSValue eval(const char *src, size_t n, const char *name, int flags) {
   return v;
 }
 
+#include "lua-mode.c"
+
 int main(void) {
   setenv("TZ", "UTC0", 1);   // musl would open /etc/localtime otherwise, and the sandbox kills a process that opens a file
   t0 = 0;
@@ -314,6 +317,7 @@ int main(void) {
   char *script = malloc(len + 1);
   if (!script || read_exact(script, len, in, &in_n) != 0) return 3;
   script[len] = 0;
+  if (len >= 5 && !memcmp(script, "--lua", 5)) return run_lua(script, len);   // a Lua plugin (lua-mode.c)
 
   rt = JS_NewRuntime();
   JS_SetMemoryLimit(rt, kHeap);

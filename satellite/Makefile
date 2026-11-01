@@ -145,13 +145,13 @@ $(SYSROOT_STAMP): third_party/sysroot-android.sh
 	touch $@
 else
 $(SYSROOT_STAMP): third_party/sysroot.sh
-	env -u MAKEFLAGS -u MFLAGS third_party/sysroot.sh $(SYSROOT) "$(TARGET) $(CPU)" $(HOST) "$(ALSA)"
+	env -u MAKEFLAGS -u MFLAGS sh third_party/sysroot.sh $(SYSROOT) "$(TARGET) $(CPU)" $(HOST) "$(ALSA)"
 	touch $@
 endif
 
 # Fetch (once) + configure + build the Sendspin library and its dependencies.
 $(SS_STAMP): third_party/fetch.sh third_party/CMakeLists.txt $(SS_TOOLCHAIN)
-	third_party/fetch.sh
+	sh third_party/fetch.sh
 	@mkdir -p $(SS_BUILD)
 	# Configured from inside the build dir: CMake's compiler probe makes zig write a file named "-".
 	cd $(SS_BUILD) && ZIG_TARGET=$(TARGET) ZIG_CPU="$(CPU)" cmake -S $(CURDIR)/third_party -B . -G Ninja \

@@ -1,4 +1,5 @@
 #include "hw/sysinfo.h"
+#include "update/updater.h"
 
 #include <sys/statvfs.h>
 
@@ -138,6 +139,9 @@ std::string SysInfo::line(const Who &who) {
   o << ";name=" << clean(who.name) << ";model=" << clean(who.model) << ";code=" << clean(who.codename) << ";ver=" << clean(who.version);
   if (!firmware().empty()) o << ";fw=" << clean(firmware());
   if (!chip().empty()) o << ";chip=" << clean(chip());
+  o << ";arch=" << Updater::arch();
+  o << ";ring=" << who.ring << ";logo=" << who.logo << ";clock=" << (who.clock ? 1 : 0);
+  o << ";streams=2";   // the command "stream" (a sound of the server with a title and a cover) is there  // which release asset is this speaker's (the panel shows its size)
   return o.str();
 }
 

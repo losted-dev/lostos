@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <deque>
+#include <thread>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -25,6 +26,7 @@
 #include "core/log.h"
 #include "esphome/mdns.h"
 #include "update/updater.h"
+#include "voice/voiceprint.h"
 
 namespace cs {
 namespace {
@@ -35,9 +37,21 @@ constexpr const char *kCommandModel = "/system/vendor/quasar/spotter_models/comm
 // within this window; the HA pipeline is then cancelled.
 constexpr int64_t kCommandAfterWakeMs = 2500;
 constexpr const char *kSounds = "/system/vendor/quasar/sounds/";
-const std::string kSndWake = std::string(kSounds) + "common/spotter_start.mp3";
-const std::string kSndCancel = std::string(kSounds) + "common/spotter_cancel.mp3";
-const std::string kSndTimer = std::string(kSounds) + "common/timer.wav";
+// The signals of the firmware (the wake chime, the cancel, the timer): where the files are depends on the model (the Lite has other names and folders),
+// so the first of the names that exists is taken, in the common and the locale folders of the firmware, then in our own folder. "" when there is none:
+// then the signal is skipped (a missing file made the player fail again and again, and a ringing timer tried every 0.3 s).
+std::string find_sound(const std::vector<std::string> &names) {
+  for (const std::string &dir : {std::string(kSounds) + "common/", std::string(kSounds) + "ru-RU/", std::string("/data/lostos/sounds/")})
+    for (const std::string &n : names)
+      for (const char *ext : {".mp3", ".wav", ".opus", ".ogg"}) {
+        const std::string path = dir + n + ext;
+        if (access(path.c_str(), R_OK) == 0) return path;
+      }
+  return "";
+}
+const std::string &snd_wake() { static const std::string p = find_sound({"spotter_start", "spotter_start_short", "notification_sound"}); return p; }
+const std::string &snd_cancel() { static const std::string p = find_sound({"spotter_cancel", "spotter_start"}); return p; }
+const std::string &snd_timer() { static const std::string p = find_sound({"timer", "alarm", "notification_sound"}); return p; }
 constexpr float kDuckGain = 0.15f;
 // AirPlay / Spotify music while a dialog is on: the louder the speaker, the deeper the dip (the assistant has to stay
 // intelligible over loud music): 0.35 at volume <= 10%, falling linearly to 0.12 (-18 dB) at volume >= 50%.
@@ -120,6 +134,7 @@ bool Settings::load(const std::string &path) {
     else if (k == "lyrics") lyrics = v == "1";
     else if (k == "cover_lookup") cover_lookup = v == "1";
     else if (k == "alice_button") alice_button = v == "1";
+    else if (k == "clock_autodim") clock_autodim = v == "1";
     else if (k == "led_case_color") led_case_color = v;
   }
   if (clock_eq != "Off" && clock_eq != "Always") clock_eq = "On track change";
@@ -145,7 +160,7 @@ void Settings::save(const std::string &path) const {
       << "\ntz=" << tz << "\nauto_update=" << auto_update << "\nupdate_attempt=" << update_attempt
       << "\nzigbee_role=" << ZigbeeService::role(zigbee_role).name << "\nzigbee_flash_failed=" << std::hex
       << zigbee_flash_failed << std::dec << "\nnearest_answers=" << nearest_answers << "\nmusic_viz=" << music_viz << "\nclock_eq=" << clock_eq << "\nclock_eq_style=" << clock_eq_style
-      << "\nled_speed=" << led_speed << "\nvoice_indication=" << voice_indication << "\nvolume_sound=" << volume_sound << "\nlyrics=" << lyrics << "\ncover_lookup=" << cover_lookup << "\nalice_button=" << alice_button
+      << "\nled_speed=" << led_speed << "\nvoice_indication=" << voice_indication << "\nvolume_sound=" << volume_sound << "\nlyrics=" << lyrics << "\ncover_lookup=" << cover_lookup << "\nalice_button=" << alice_button << "\nclock_autodim=" << clock_autodim
       << "\nled_case_color=" << led_case_color << "\n";
   }
   rename(tmp.c_str(), path.c_str());
@@ -234,6 +249,7 @@ bool Controller::start() {
   if (!leds_.open()) LOGW("LEDs unavailable");
   if (!clock_.open()) LOGW("clock unavailable");
   clock_.set_enabled(st_.clock_on);
+  clock_.set_auto_dim(st_.clock_autodim);
   clock_.set_brightness(st_.clock_brightness);
   clock_.set_scroll_ms(st_.clock_scroll_ms);
   clock_.set_frame_callback([this](const std::string &f) { if (api_) api_->publish_text_sensor(TextSensorId::DISPLAY, f); });   // the live mirror of the display in the panel
@@ -386,9 +402,13 @@ bool Controller::start() {
     publish_media();
   };
   airplay_.on_spotify_track = [this] {
+    if (spotify_user_pause_ms_ && Loop::now_ms() - spotify_user_pause_ms_ < 3600000)
+      LOGW("spotify: a new track began %lld s after the pause we sent and we did not play or skip since (Spotify went on by itself or from another device)", (long long)((Loop::now_ms() - spotify_user_pause_ms_) / 1000));
     track_change(Loop::now_ms() - skip_ms_ < 5000 ? skip_dir_ : 1);
   };
   airplay_.on_spotify_start = [this] {
+    if (spotify_user_pause_ms_ && Loop::now_ms() - spotify_user_pause_ms_ < 3600000)
+      LOGW("spotify: playing again %lld s after the pause we sent and we did not play since (Spotify went on by itself or from another device)", (long long)((Loop::now_ms() - spotify_user_pause_ms_) / 1000));
     spotify_vol_ = -1.f;
     push_volume_to_sources();                 // the app's slider shows the speaker's volume from the first second
     last_target_ = MusicTarget::SPOTIFY;  // Spotify takes over: the AirPlay sender is dropped (AirPlay itself stays on)
@@ -433,14 +453,23 @@ bool Controller::start() {
   phost_.display = [this](const std::string &text, int sec) { clock_.show_temporary_text(text, sec); };
   phost_.media = [this](const std::string &cmd) { media_command(cmd); };
   phost_.volume = [this] { return st_.volume; };
+  phost_.clock_segments = [this](const uint8_t *levels, int ttl_ms) { clock_.show_segments(levels, ttl_ms); };
+  phost_.set_volume = [this](int percent) { set_volume(float(percent) / 100.f, true); };
+  phost_.device_info = [this] {
+    return "model=" + model_.codename + " ring=" + std::to_string(model_.ring.count) + " logo=" + std::to_string(model_.logo.count) +
+           " clock=" + (model_.clock_dir.empty() ? "0" : "1") + " microphone=1";
+  };
   phost_.button_claim = [this](bool claimed) { button_claimed_ = claimed; LOGI("centre button %s by a plugin", claimed ? "claimed" : "released"); };
   phost_.publish = [this](const std::string &topic, const std::string &text) { api_->fire_event(EventId::BUTTON, "plugin " + topic + " " + text); };
   phost_.audio_state = [this](bool playing) { hub_.report(MediaSource::PLUGIN, playing, Loop::now_ms()); };
-  phost_.play_url = [this](const std::string &url, const std::string &) {   // as media from Home Assistant: the music channel, Sendspin steps aside
-    if (sendspin_) sendspin_->yield_to_local();
-    player_.play(Channel::MUSIC, {url});
+  phost_.play_url = [this](const std::string &plugin, const std::string &url, const std::string &title, const std::string &cover, const std::string &source) {
+    play_plugin_stream(plugin, url, title, cover, source);
   };
-  phost_.stop_url = [this] { player_.stop(Channel::MUSIC); };
+  phost_.stop_url = [this] {
+    stream_title_.clear();
+    player_.stop(Channel::MUSIC);
+    hub_.report(MediaSource::PLUGIN, false, Loop::now_ms());
+  };
   phost_.state_changed = [this](const std::string &) { publish_plugins(); };
   phost_.start();
   link_.on_press = [this](const std::string &code, const std::string &wav) { loop_.post([this, code, wav] { press_begin(code, wav); }); };
@@ -457,7 +486,10 @@ bool Controller::start() {
         if (!spotify_ctl("pause")) api_->fire_event(EventId::BUTTON, "spotify_pause");
         break;
       case MediaSource::BLUETOOTH: bt_.command("pause"); break;
-      case MediaSource::PLUGIN: phost_.audio_stop(); break;
+      case MediaSource::PLUGIN:
+        phost_.audio_stop();
+        if (!stream_title_.empty()) { stream_title_.clear(); player_.stop(Channel::MUSIC); }   // a stream of a plugin (radio) stands aside as well
+        break;
       default: break;
     }
   };
@@ -535,6 +567,7 @@ bool Controller::start() {
   mic_.on_wake([this](const std::string &phrase, float level_db) { on_wake(phrase, level_db); });
   mic_.on_command([this](const std::string &word) { on_command(word); });
   mic_.on_audio([this](const int16_t *pcm, size_t n) {
+    if (phase_ == Phase::LISTENING && utt_open_ && utt_pcm_.size() < size_t(16000) * 20) utt_pcm_.insert(utt_pcm_.end(), pcm, pcm + n);
     if (phase_ == Phase::LISTENING || (phase_ == Phase::SPEAKING && barge_enabled_ && !announcing_))
       api_->voice_send_audio(pcm, n);
     else if (arbitrating_)  // the request goes on with what was said right after the wake word
@@ -579,7 +612,7 @@ void Controller::start_dlna(const DeviceIdentity &id) {
   dlna_.set_volume = [this](float v) { set_volume(v, true); };
   dlna_.get_mute = [this] { return st_.muted; };
   dlna_.set_mute = [this](bool m) { set_muted(m); };
-  if (!dlna_.start(id.friendly_name, "5c0a3d00-7c3e-4a8e-9b2f-" + mac, 49153)) LOGW("DLNA renderer did not start");
+  if (!dlna_.start(id.friendly_name, "5c0a3d00-7c3e-4a8e-9b2f-" + mac, 49153, model_.model_name.rfind("Yandex ", 0) == 0 ? model_.model_name.substr(7) : model_.model_name)) LOGW("DLNA renderer did not start");
 }
 
 void Controller::persist() {
@@ -602,6 +635,7 @@ void Controller::on_client_connected(const std::string &client_info) {
   api_->publish_switch(SwitchId::LYRICS, st_.lyrics);
   api_->publish_switch(SwitchId::COVER_LOOKUP, st_.cover_lookup);
   api_->publish_switch(SwitchId::ALICE_BUTTON, st_.alice_button);
+  api_->publish_switch(SwitchId::CLOCK_AUTODIM, st_.clock_autodim);
   eq_publish();
   publish_update();
   api_->publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, hw_mic_muted_);
@@ -771,7 +805,7 @@ void Controller::start_pipeline(const std::string &phrase, bool earcon, std::vec
   tts_played_ = false;
   continue_conversation_ = false;
   update_duck();
-  if (earcon) player_.play(Channel::ANNOUNCE, {kSndWake});
+  if (earcon && !snd_wake().empty()) player_.play(Channel::ANNOUNCE, {snd_wake()});
   const uint64_t dialog = dialog_;
   api_->voice_request_start(phrase);
   if (dialog != dialog_) return;  // sending failed and closed the voice client, which ended the dialog
@@ -784,6 +818,8 @@ void Controller::start_pipeline(const std::string &phrase, bool earcon, std::vec
       api_->voice_send_audio(ctx.data() + i, std::min<size_t>(512, ctx.size() - i));
     if (dialog != dialog_) return;
   }
+  utt_pcm_.assign(preroll.begin(), preroll.end());
+  utt_open_ = true;
   // HA drops audio queued before the start and queues what follows it on the same connection.
   for (size_t i = 0; i < preroll.size() && dialog == dialog_; i += 512)
     api_->voice_send_audio(preroll.data() + i, std::min<size_t>(512, preroll.size() - i));
@@ -797,7 +833,64 @@ void Controller::stop_streaming() {
   // The microphone stays open while she thinks and speaks (with barge-in on): a shout like "игнорируй, не отвечай" cancels
   // what she was about to do; a wake word heard meanwhile keeps its audio.
   mic_.set_streaming(arbitrating_ || barge_enabled_);
-  if (phase_ == Phase::LISTENING) phase_ = Phase::PROCESSING;
+  if (phase_ == Phase::LISTENING) {
+    phase_ = Phase::PROCESSING;
+    voiceprint_flush();
+  }
+}
+
+void Controller::voiceprint_flush() {
+  utt_open_ = false;
+  std::vector<int16_t> pcm;
+  pcm.swap(utt_pcm_);
+  if (pcm.size() < size_t(16000) * 3 / 4 || vp_busy_.exchange(true)) return;   // too short for a voiceprint, or the last one is still being worked out
+  const uint32_t seq = ++vp_seq_;
+  std::thread([this, seq, pcm = std::move(pcm)]() mutable {
+    static VoicePrint *vp = nullptr;   // loaded on the first use and kept; only this worker touches it (one at a time)
+    static bool tried = false;
+    std::string err, line;
+    if (!tried) {
+      tried = true;
+      if (nice(10) < 0) {}
+      VoicePrint *v = new VoicePrint();
+      if (v->load("/system/vendor/quasar/bio_lingware", &err)) {
+        vp = v;
+      } else {
+        LOGW("voiceprint: %s", err.c_str());
+        delete v;
+      }
+    }
+    if (vp) {
+      std::vector<float> e;
+      float age = -1, gender = -1;
+      const int64_t t0 = Loop::now_ms();
+      if (vp->embed(pcm.data(), pcm.size(), &e, &age, &gender, &err)) {
+        float mx = 0;
+        for (float x : e) mx = std::max(mx, std::fabs(x));
+        const float scale = mx > 0 ? mx / 127.f : 1.f;
+        static const char *b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string raw, enc;
+        for (float x : e) raw.push_back(char(int8_t(std::lround(std::max(-127.f, std::min(127.f, x / scale))))));
+        for (size_t i = 0; i < raw.size(); i += 3) {
+          const uint32_t v = uint32_t(uint8_t(raw[i])) << 16 | (i + 1 < raw.size() ? uint32_t(uint8_t(raw[i + 1])) << 8 : 0u) | (i + 2 < raw.size() ? uint32_t(uint8_t(raw[i + 2])) : 0u);
+          enc += b64[v >> 18 & 63];
+          enc += b64[v >> 12 & 63];
+          enc += i + 1 < raw.size() ? b64[v >> 6 & 63] : '=';
+          enc += i + 2 < raw.size() ? b64[v & 63] : '=';
+        }
+        char head[96];
+        snprintf(head, sizeof head, "%u %.6f %.3f %.3f ", seq, scale, age, gender);
+        line = head + enc;
+        LOGI("voiceprint %u: %.1f s of speech in %lld ms", seq, pcm.size() / 16000.0, (long long)(Loop::now_ms() - t0));
+      } else {
+        LOGI("voiceprint %u: %s", seq, err.c_str());
+      }
+    }
+    loop_.post([this, line] {
+      vp_busy_ = false;
+      if (!line.empty()) api_->publish_text_sensor(TextSensorId::VOICEPRINT, line);
+    });
+  }).detach();
 }
 
 void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::string> &data) {
@@ -862,7 +955,10 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
       stop_streaming();
       error_shown_ = true;
       leds_.set_ui_state(UiState::ERROR);
-      if (get("code") != "stt-no-text-recognized") play_closing_earcon(kSounds + model_.error_sound);
+      if (get("code") != "stt-no-text-recognized") {
+        const std::string err_snd = kSounds + model_.error_sound;
+        if (access(err_snd.c_str(), R_OK) == 0) play_closing_earcon(err_snd);
+      }
       break;
     case VaEvent::RUN_END:
       stop_streaming();
@@ -904,6 +1000,8 @@ void Controller::finish_interaction() {
     stop_sent_ = true;
   }
   awaiting_run_start_ = false;
+  utt_open_ = false;
+  utt_pcm_.clear();
   mic_.set_streaming(arbitrating_);
   phase_ = Phase::IDLE;
   dialog_++;
@@ -964,6 +1062,23 @@ void Controller::interrupt_speech() {
 }
 
 // Error and cancel sounds outlive the dialog they close; music stays ducked until they end.
+// A stream with a name and a cover: what a plugin of the speaker plays (lostos.play) and what the server plays for a plugin of its own
+// (the command "stream" of the assistant service). The stream is shown in «Сейчас играет» and answers the buttons «вперёд» / «назад».
+void Controller::play_plugin_stream(const std::string &plugin, const std::string &url, const std::string &title, const std::string &cover, const std::string &source,
+                                    const std::string &artist, bool from_server, uint32_t dur_ms, uint32_t offset_ms) {
+  if (sendspin_) sendspin_->yield_to_local();   // as media from Home Assistant: the music channel, Sendspin steps aside
+  stream_plugin_ = plugin;
+  stream_label_ = source.empty() ? std::string("Плагин") : source.substr(0, 30);
+  stream_title_ = title.empty() ? stream_label_ : title.substr(0, 90);
+  stream_cover_ = cover.substr(0, 400);
+  stream_artist_ = artist.substr(0, 90);
+  stream_server_ = from_server;
+  stream_dur_ms_ = dur_ms;
+  stream_offset_ms_ = offset_ms;
+  hub_.report(MediaSource::PLUGIN, true, Loop::now_ms());   // a plugin starts a stream: whoever played before (Spotify, AirPlay, Bluetooth) is paused, as when one of them takes over
+  player_.play(Channel::MUSIC, {url}, nullptr, !from_server);   // a stream of the server is a track (it can be sought and buffered), not a live radio
+}
+
 void Controller::play_closing_earcon(const std::string &path) {
   closing_earcon_ = true;
   const uint64_t seq = ++earcon_seq_;
@@ -1253,7 +1368,7 @@ void Controller::button(Button b, Press p) {
     press_waiting_ = false;
     clock_.clear_code();
     link_.press_pressed();
-    player_.play(Channel::ANNOUNCE, {kSndWake});
+    if (!snd_wake().empty()) player_.play(Channel::ANNOUNCE, {snd_wake()});
     return;
   }
   if (b == Button::ACTION) {
@@ -1263,7 +1378,7 @@ void Controller::button(Button b, Press p) {
     if (timer_ringing_) return stop_timer_ring();
     if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING) {
       interrupt_speech();  // an announcement playing over the dialog goes with it
-      play_closing_earcon(kSndCancel);
+      play_closing_earcon(snd_cancel());
       return finish_interaction();
     }
     if (phase_ == Phase::SPEAKING || announcing_) {
@@ -1398,7 +1513,7 @@ void Controller::alarm_tick() {
       play_reminder(path, s.last);
     } else {
       LOGW("reminder %s: no phrase on the speaker, a plain signal instead", s.id.c_str());
-      player_.play(Channel::ANNOUNCE, {kSndTimer});
+      if (!snd_timer().empty()) player_.play(Channel::ANNOUNCE, {snd_timer()});
     }
   }
   if (fire) {
@@ -1420,8 +1535,12 @@ void Controller::ring_timer() {
     ring_yielded_ = true;
     return;
   }
-  player_.play(Channel::ANNOUNCE, {kSndTimer}, [this](bool) {
-    if (timer_ringing_ && !timer_ring_tick_) timer_ring_tick_ = loop_.add_timer(300, [this] { ring_timer(); });
+  if (snd_timer().empty()) {                          // no signal file on this model: the ring goes on silently (the lights), without hammering the player
+    timer_ring_tick_ = loop_.add_timer(2000, [this] { ring_timer(); });
+    return;
+  }
+  player_.play(Channel::ANNOUNCE, {snd_timer()}, [this](bool ok) {
+    if (timer_ringing_ && !timer_ring_tick_) timer_ring_tick_ = loop_.add_timer(ok ? 300 : 2000, [this] { ring_timer(); });
   });
 }
 
@@ -1592,10 +1711,8 @@ void Controller::set_volume(float v, bool feedback) {
     if (st_.volume_sound && !announcing_ && phase_ == Phase::IDLE && now - last_click_ms_ > 250) {   // a click on every step (not in the middle of a dialog)
       last_click_ms_ = now;
       // the stock click of the Station; Station 1 has volume_change.wav instead
-      static const std::string click = access((std::string(kSounds) + "common/volume_sound.mp3").c_str(), R_OK) == 0
-                                           ? std::string(kSounds) + "common/volume_sound.mp3"
-                                           : std::string(kSounds) + "common/volume_change.wav";
-      player_.play(Channel::ANNOUNCE, {click});
+      static const std::string click = find_sound({"volume_sound", "volume_change"});
+      if (!click.empty()) player_.play(Channel::ANNOUNCE, {click});
     }
   }
   if (sendspin_) sendspin_->report_volume(st_.volume, st_.muted);
@@ -1679,8 +1796,29 @@ void Controller::publish_media() {
 }
 
 // The music that counts (playing, or paused and resumable): its source, artist, title and cover; the source is empty when none.
+// A plugin's stream (the radio) is what plays: it wins over a source that is only paused.
+bool Controller::stream_active() const {
+  const PlayState ps = player_.state(Channel::MUSIC);
+  // a paused stream stays the music that counts (the Spotify of an hour ago that is paused too must not take its place in the player); another source that plays wins
+  // The stream stays in the player until another source plays (a track that has ended or failed is shown stopped, not replaced by the page of a Spotify that is only paused).
+  return !stream_title_.empty() && (ps == PlayState::PLAYING || ps == PlayState::LOADING || ps == PlayState::PAUSED || !ext_playing());
+}
+
 DlnaRenderer::Now Controller::now_info() const {
   DlnaRenderer::Now n;
+  if (stream_active()) {
+    const PlayState ps = player_.state(Channel::MUSIC);
+    n.source = stream_label_;
+    n.title = stream_title_;
+    n.cover = stream_cover_;
+    n.artist = stream_artist_;
+    for (std::string *f : {&n.title, &n.cover, &n.artist})
+      for (char &c : *f)
+        if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+    n.playing = ps == PlayState::PLAYING || ps == PlayState::LOADING;
+    n.paused = !n.playing;
+    return n;
+  }
   if (!(ext_playing() || ext_paused())) return n;
   std::string line;
   switch (music_target()) {
@@ -1742,7 +1880,7 @@ void Controller::media_command(const std::string &cmd) {
 }
 
 void Controller::publish_sysinfo() {
-  api_->publish_text_sensor(TextSensorId::SYSINFO, sysinfo_.line({speaker_name(model_), model_.friendly_name, model_.codename, LOSTOS_VERSION}));
+  api_->publish_text_sensor(TextSensorId::SYSINFO, sysinfo_.line({speaker_name(model_), model_.friendly_name, model_.codename, LOSTOS_VERSION, model_.ring.count, model_.logo.count, !model_.clock_dir.empty()}));
 }
 
 // The owner gave the speaker a name (or took it back): AirPlay and Spotify announce themselves under it, so they start again with the new name.
@@ -1817,11 +1955,12 @@ void Controller::eq_publish() {
   api_->publish_text_sensor(TextSensorId::EQ, std::to_string(on) + ";" + std::to_string(pre) + ";" + gains);
 }
 
-// The picture of the music in one text: {"source","playing","title","artist","cover","uri","pos","dur","air_cover"}.
+// The picture of the music in one text: {"source","playing","title","artist","cover","uri","pos","dur","air_cover"}; source: spotify, airplay, bluetooth, plugin (a plugin's stream: + "plugin" its id, "label" its name for the source).
 // pos is where the track was at the moment of this message (the reader counts on while it plays).
 void Controller::publish_media_state() {
   const DlnaRenderer::Now n = now_info();
-  const char *src = n.source == "Spotify" ? "spotify" : n.source == "AirPlay" ? "airplay" : n.source == "Bluetooth" ? "bluetooth" : "";
+  const bool stream = stream_active();
+  const char *src = stream ? "plugin" : n.source == "Spotify" ? "spotify" : n.source == "AirPlay" ? "airplay" : n.source == "Bluetooth" ? "bluetooth" : "";
   std::string uri;
   uint32_t pos = 0, dur = 0;
   if (n.source == "Spotify") {
@@ -1830,14 +1969,19 @@ void Controller::publish_media_state() {
     size_t f3 = f2 == std::string::npos ? f2 : spotify_now_.find('\t', f2 + 1);
     if (f2 != std::string::npos) uri = spotify_now_.substr(f2 + 1, f3 == std::string::npos ? std::string::npos : f3 - f2 - 1);
     if (f3 != std::string::npos) dur = uint32_t(strtoul(spotify_now_.c_str() + f3 + 1, nullptr, 10));
+  } else if (stream && stream_server_) {                       // a stream of a plugin of the server: the position of the player and the length the plugin named
+    const int64_t at = player_.position_ms(Channel::MUSIC);
+    pos = stream_offset_ms_ + (at > 0 ? uint32_t(at) : 0);
+    dur = stream_dur_ms_;
   } else if (!n.source.empty() && pb_src_ == (n.source == "AirPlay" ? "airplay" : "bluetooth")) {
     pos = pb_pos_;
     dur = pb_dur_;
   }
   std::string j = std::string("{\"source\":\"") + src + "\",\"playing\":" + (n.playing ? "true" : "false") + ",\"title\":" + json_string(n.title) +
-                  ",\"artist\":" + json_string(n.artist) + ",\"cover\":" + json_string(n.source == "Spotify" ? n.cover : std::string()) +
+                  ",\"artist\":" + json_string(n.artist) + ",\"cover\":" + json_string(n.source == "Spotify" || stream ? n.cover : std::string()) +
                   ",\"uri\":" + json_string(uri) + ",\"pos\":" + std::to_string(pos) + ",\"dur\":" + std::to_string(dur) +
-                  ",\"air_cover\":" + std::to_string(air_cover_ver_) + "}";
+                  ",\"air_cover\":" + std::to_string(air_cover_ver_) +
+                  (stream ? ",\"plugin\":" + json_string(stream_plugin_) + ",\"label\":" + json_string(stream_label_) : std::string()) + "}";
   if (j == last_media_json_) return;
   last_media_json_ = j;
   phost_.event("media", std::string(src[0] ? src : "none") + " " + (n.playing ? "1" : "0") + " " + n.title);   // to the plugins that follow the music
@@ -1900,6 +2044,7 @@ void Controller::on_media_command(const MediaCommandRequest &cmd) {
       });
     } else {
       if (sendspin_) sendspin_->yield_to_local();  // HA media takes the speaker from Sendspin
+      stream_title_.clear();                        // not the plugin's stream any more
       player_.play(Channel::MUSIC, {cmd.media_url});
     }
   }
@@ -1996,6 +2141,9 @@ void Controller::on_switch(SwitchId id, bool state) {
     st_.cover_lookup = state;
   } else if (id == SwitchId::ALICE_BUTTON) {
     st_.alice_button = state;
+  } else if (id == SwitchId::CLOCK_AUTODIM) {
+    st_.clock_autodim = state;
+    clock_.set_auto_dim(state);
   }
   api_->publish_switch(id, state);
   persist();
@@ -2018,7 +2166,7 @@ void Controller::publish_update() {
 }
 
 void Controller::check_update() {
-  if (access("/data/lostos/allow-update", F_OK) != 0) return;   // updates only when this file exists: nothing is offered or installed
+  if (access("/data/lostos/no-update", F_OK) == 0) return;   // the owner switched updates off: nothing is offered or installed
   updater_.check([this](const std::string &err, const Release &r) {
     if (!err.empty()) {
       LOGI("update check: %s", err.c_str());
@@ -2107,8 +2255,8 @@ void Controller::install_update(const char *why) {
 }
 
 void Controller::on_update(UpdateCommand cmd) {
-  if (access("/data/lostos/allow-update", F_OK) != 0) {
-    LOGI("update request ignored: updates are disabled (create /data/lostos/allow-update to allow them)");
+  if (access("/data/lostos/no-update", F_OK) == 0) {
+    LOGI("update request ignored: updates are switched off (/data/lostos/no-update)");
     return;
   }
   if (cmd == UpdateCommand::CHECK) return check_update();
@@ -2117,7 +2265,7 @@ void Controller::on_update(UpdateCommand cmd) {
     LOGW("update: no other release to install");
     return;
   }
-  install_update("requested from Home Assistant");
+  install_update("requested");
 }
 
 void Controller::on_number(NumberId id, float value) {
@@ -2271,6 +2419,12 @@ void Controller::on_action(ActionId id, const std::string &value, int32_t second
       bluetooth_set(value == "bluetooth on", false);
       return;
     }
+    if (value == "listen") {                                       // the server asks to listen (the microphone API of Luna): like a tap on the button, with its chime and the ring; never while muted
+      if (st_.mic_muted || hw_mic_muted_ || phase_ != Phase::IDLE) return;
+      LOGI("listening on the server's request");
+      start_pipeline("", true);
+      return;
+    }
     if (value == "hello") {
       server_last_ms_ = Loop::now_ms();  // our assistant server says it is there (Home Assistant also subscribes to the voice pipeline, so that is no proof)
       server_hello_ = true;
@@ -2286,6 +2440,28 @@ void Controller::on_action(ActionId id, const std::string &value, int32_t second
     }
     if (value.rfind("name ", 0) == 0 || value == "name") {   // the name of the speaker for AirPlay and Spotify (empty: the name of the model again)
       rename_speaker(value.size() > 5 ? value.substr(5) : "");
+      return;
+    }
+    if (value.rfind("stream ", 0) == 0) {   // a sound of the server with a name: "stream <source>	<url>	<title>	<cover>" (tabs between the fields)
+      std::vector<std::string> f;
+      size_t at = 7, tab;
+      while ((tab = value.find('	', at)) != std::string::npos) {
+        f.push_back(value.substr(at, tab - at));
+        at = tab + 1;
+      }
+      f.push_back(value.substr(at));
+      // fields: source label, url, title, cover, artist, id of the plugin (the last two are new: an older server sends four)
+      if (f.size() >= 2 && f[1].rfind("http", 0) == 0)
+        play_plugin_stream(f.size() > 5 && !f[5].empty() ? f[5] : "server", f[1], f.size() > 2 ? f[2] : "", f.size() > 3 && f[3].rfind("http", 0) == 0 ? f[3] : "", f[0],
+                           f.size() > 4 ? f[4] : "", true, f.size() > 6 ? uint32_t(strtoul(f[6].c_str(), nullptr, 10)) : 0u,
+                           f.size() > 7 ? uint32_t(strtoul(f[7].c_str(), nullptr, 10)) : 0u);
+      return;
+    }
+    if (value.rfind("stream_seek ", 0) == 0) {   // the progress bar of the panel on a stream of a plugin of the server: a jump to a position (ms)
+      const int64_t to = strtoll(value.c_str() + 12, nullptr, 10);
+      const bool ok = !stream_title_.empty() && stream_server_ && player_.seek_ms(Channel::MUSIC, to);
+      LOGI("stream seek to %lld ms: %s (position %lld ms)", (long long)to, ok ? "done" : stream_server_ ? "refused by the pipeline" : "no stream of the server", (long long)player_.position_ms(Channel::MUSIC));
+      if (ok) publish_media_state();
       return;
     }
     if (value.rfind("plugin ", 0) == 0) {   // install | remove | enable | disable a native plugin (docs/plugins.md)
@@ -2400,6 +2576,10 @@ bool Controller::music_mode() const {
 }
 
 Controller::MusicTarget Controller::music_target() const {
+  // A stream of a plugin on our own player (a radio, SoundCloud) comes first: it is the last thing that was started, and when another source really starts, the media hub
+  // stops the stream (stream_title_ is cleared). A Spotify that still counts as «playing» for a moment, or is only paused, must not take the pause / play key from it.
+  if (!stream_title_.empty() && player_.state(Channel::MUSIC) != PlayState::IDLE && player_.state(Channel::MUSIC) != PlayState::ERROR)
+    return MusicTarget::NONE;
   if (airplay_.playing()) return MusicTarget::AIRPLAY;
   if (airplay_.spotify_playing()) return MusicTarget::SPOTIFY;
   if (bt_.playing()) return MusicTarget::BT;
@@ -2433,18 +2613,21 @@ void Controller::transport(Transport t) {
     }
     if (skip) track_change(skip_dir_);
   } else if (tg == MusicTarget::SPOTIFY) {
+    if (t != Transport::PAUSE) spotify_user_pause_ms_ = 0;   // played, skipped or toggled by us: the pause is over
     // Spotify is controlled right in librespot on the speaker (a control socket), the PC is not needed. The assistant
     // server (Web API) is only the fallback, and starts fresh music after a long pause.
     const bool resume_old = std::string(spotify_play_event(false)) == "cmd_play" || !server_alive();
     switch (t) {
       case Transport::PLAYPAUSE:
         if (airplay_.spotify_playing()) {
+          spotify_user_pause_ms_ = now;
           if (!spotify_ctl("pause")) api_->fire_event(EventId::BUTTON, "cmd_pause");
         } else if (!(resume_old && airplay_.spotify_known() && spotify_resume())) {
           api_->fire_event(EventId::BUTTON, spotify_play_event(false));
         }
         break;
       case Transport::PAUSE:
+        spotify_user_pause_ms_ = now;
         if (!spotify_ctl("pause")) api_->fire_event(EventId::BUTTON, "cmd_pause");
         break;
       case Transport::PLAY:
@@ -2482,6 +2665,15 @@ void Controller::transport(Transport t) {
         break;
       case Transport::NEXT:
       case Transport::PREV:
+        if (!stream_title_.empty() && stream_server_) {   // a stream of a plugin of the server: the server moves its queue
+          api_->fire_event(EventId::BUTTON, t == Transport::NEXT ? "stream_next" : "stream_previous");
+          track_change(t == Transport::NEXT ? 1 : -1);          // the sweep on the display and the lights, as for every other source
+          break;
+        }
+        if (!stream_title_.empty() && phost_.transport(t == Transport::NEXT ? "next" : "previous")) {   // the radio: the next station
+          track_change(t == Transport::NEXT ? 1 : -1);
+          break;
+        }
         if (sendspin_) sendspin_->transport(t == Transport::NEXT ? SendspinService::Transport::NEXT
                                                                  : SendspinService::Transport::PREVIOUS);
         break;
@@ -2621,7 +2813,7 @@ void Controller::local_wake() {
   local_cmd_done_ = false;
   local_listen_until_ms_ = Loop::now_ms() + 4500;
   probe_net();
-  player_.play(Channel::ANNOUNCE, {kSndWake});
+  if (!snd_wake().empty()) player_.play(Channel::ANNOUNCE, {snd_wake()});
   leds_.set_ui_state(UiState::LISTENING);
   update_commands();
   loop_.add_timer(4600, [this] {

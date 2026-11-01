@@ -256,6 +256,7 @@ struct Player::Impl {
     bool active = false;     // a url list is loaded
     bool want_play = false;  // user wants PLAYING (false => paused)
     bool buffering = false;
+    bool live = false;
     bool reached_playing = false;
     bool all_ok = true;
     int retries = 0;          // network retries of the current url
@@ -485,7 +486,7 @@ struct Player::Impl {
       case MSG_BUFFERING: {
         int pct = 100;
         g.gst_message_parse_buffering(msg, &pct);
-        bool buf = pct < 100;
+        bool buf = pct < 100 && !c.live;
         if (buf != c.buffering) {
           LOGD("player: ch%d buffering %d%%", int(c.id), pct);
           c.buffering = buf;
@@ -628,11 +629,11 @@ bool Player::init(const std::string &sink) {
   return true;
 }
 
-void Player::play(Channel ch, std::vector<std::string> urls, DoneCb done) {
+void Player::play(Channel ch, std::vector<std::string> urls, DoneCb done, bool live) {
   auto *d = impl_.get();
   uint64_t gen = d->supersede(ch, std::move(done));
   if (!d->ok) return d->complete(ch, gen, false);
-  d->invoke([d, ch, gen, urls = std::move(urls)]() mutable {
+  d->invoke([d, ch, gen, live, urls = std::move(urls)]() mutable {
     auto &c = d->chans[int(ch)];
     if (urls.empty()) {
       d->halt(c, true);
@@ -644,6 +645,7 @@ void Player::play(Channel ch, std::vector<std::string> urls, DoneCb done) {
     c.index = 0;
     c.item_gen = gen;
     c.active = true;
+    c.live = live;
     c.want_play = true;
     c.all_ok = true;
     c.retries = 0;
@@ -685,6 +687,22 @@ void Player::stop(Channel ch) {
 }
 
 PlayState Player::state(Channel ch) const { return impl_->chans[int(ch)].state.load(); }
+
+int64_t Player::position_ms(Channel ch) const {
+  auto &d = *impl_;
+  auto &c = d.chans[int(ch)];
+  int64_t pos = 0;
+  if (!c.pipe || !g.gst_element_query_position || !g.gst_element_query_position(c.pipe, GST_FORMAT_TIME, &pos)) return -1;
+  return pos / 1000000;
+}
+
+bool Player::seek_ms(Channel ch, int64_t ms) {
+  auto &d = *impl_;
+  auto &c = d.chans[int(ch)];
+  if (!c.pipe || !g.gst_element_seek_simple || ms < 0) return false;
+  if (g.gst_element_seek_simple(c.pipe, GST_FORMAT_TIME, GST_SEEK_FLAG_FLUSH_KEY_UNIT, ms * 1000000) != 0) return true;
+  return g.gst_element_seek_simple(c.pipe, GST_FORMAT_TIME, 1 | 2, ms * 1000000) != 0;   // FLUSH | ACCURATE: what the demuxer cannot do on a key frame it does by position
+}
 
 void Player::set_channel_gain(Channel ch, float gain) {
   auto *d = impl_.get();

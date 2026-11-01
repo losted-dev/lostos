@@ -33,13 +33,16 @@ ru.example.radio/
 | `lostos.tool({name, description, parameters}, fn)` | `assistant.tools` | команда для ассистента: нейросеть сама решает, когда её вызвать и с какими аргументами. `fn(args)` возвращает строку, которую ассистент перескажет. `parameters`: `{имя: "описание"}` или `{имя: {type, description, optional}}` |
 | `lostos.http(url, {method, headers, body, json})` | `network.connect` | HTTP(S)-запрос делает прошивка (её TLS и сертификаты). Ответ: `{status, ok, type, text, json()}`, тело до 256 КБ. Адреса самой колонки закрыты |
 | `lostos.http.json(url, opts)` | `network.connect` | то же, сразу JSON; бросает ошибку, если статус не 2xx |
-| `lostos.play(url, {title})`, `lostos.stop()` | `audio.play` | поток или файл играет плеер колонки (канал музыки) |
+| `lostos.play(url, {title, cover, source})`, `lostos.stop()` | `audio.play` | поток или файл играет плеер колонки (канал музыки); «Сейчас играет» показывает `title`, `cover` (адрес картинки) и `source` (подпись источника, по умолчанию «Плагин») |
 | `lostos.storage.get(key)`, `.set(key, value)` | `storage` | до 32 записей по 256 байт, переживают перезагрузку |
 | `lostos.on("button" \| "media" \| "volume", fn)` | `events.subscribe` | события: `action`, `action_long`, `volume_up`, `volume_down`; `{source, playing, title}`; громкость 0..1 |
+| `lostos.on("transport", fn)` | `audio.play` | «вперёд» / «назад» (кнопки колонки, панель, Home Assistant), пока играет поток этого плагина: `"next"` или `"previous"` |
+| команда `panel_ui` | `assistant.tools` | своя страница в панели и меню в плеере (манифест `"ui"`), см. `docs/plugins.md` → «Своя страница в панели». Команды с началом `panel_` ассистент не видит |
 | `lostos.led(r, g, b, секунд)` | `device.led` | кольцо загорается цветом |
 | `lostos.display(текст, секунд)` | `device.display` | текст на часах |
 | `lostos.media("play" \| "pause" \| "next" …)` | `media.control` | управление музыкой |
 | `lostos.volume()` | `device.read` | громкость 0..1 |
+| `await lostos.device()` | — | что за колонка: `{model, ring, logo, clock, microphone}` (число светодиодов кольца и логотипа, есть ли часы), чтобы плагин сам решал, что ему показывать |
 | `lostos.publish(тема, текст)` | `events.publish` | событие для Home Assistant |
 | `lostos.log(...)`, `console.log(...)` | — | строка в журнале колонки |
 | `setTimeout`, `setInterval`, `clearTimeout`, `lostos.sleep(ms)` | — | таймеры |

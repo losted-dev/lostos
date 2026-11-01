@@ -81,6 +81,7 @@ class Clock {
   bool open();  // sysfs LEDs <Model::clock_dir><segment><position>
   void set_enabled(bool on);
   void set_brightness(float b);  // 0..1 user scale (multiplied by ambient auto-dimming)
+  void set_auto_dim(bool on);    // the light sensor dims the display by itself (default); off: always the brightness the user chose
   void set_ambient_lux(float lux);
   // Show a countdown mm:ss (or h:mm) instead of time while ms_left > 0; <= 0 clears. running:
   // counts down on its own from ms_left; otherwise ms_left stays shown (paused timer).
@@ -110,6 +111,8 @@ class Clock {
   // only switch segments on/off). program: "listen" | "think" | "speak[:<hex>]" (one loudness byte per
   // 40 ms) | "off" (fades out). Fades in and out, and the clock fades back in afterwards.
   void show_temporary_anim(const std::string &program, int seconds);
+  // A frame of a plugin: 28 levels 0..255, digit by digit, segments a b c d e f g; kept for ttl_ms, <= 0 takes it away.
+  void show_segments(const uint8_t *levels, int ttl_ms);
   // Music on the display: a track change darkens the clock, bars sweep right (dir +1) or left (-1) and the
   // equalizer shows for eq_seconds; show_eq(ms, true) lets the bars fall (pause); set_eq_always keeps the
   // equalizer as the clock face while music plays (set_music_playing).

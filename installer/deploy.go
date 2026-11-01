@@ -181,6 +181,10 @@ func deployFiles(s, bin, ts, arch string, zigbee, legacy bool) (changed, supChan
 		return
 	}
 
+	if !deployFfmpeg(s) {
+		return
+	}
+
 	if !deployProfile(s, code) {
 		return
 	}
@@ -272,6 +276,39 @@ func deployJSRuntime(s string) bool {
 	}
 	// a new inode: the plugins that run keep the old program, the next start of each takes the new one (a hard link per plugin, see host.cpp)
 	return shTo(out, s, "cd "+dataDir+" && chmod 755 lostos-js.new && mv lostos-js.new lostos-js && sync") == nil
+}
+
+// deployFfmpeg copies ffmpeg (a static aarch64 build, tools/build-ffmpeg.sh) to /data/lostos/ffmpeg: the programs of plugins written for Luna find it as /opt/bin/ffmpeg
+// (the firmware links it into the folder of each, see host.cpp). A payload without it leaves the speaker as it was: only the plugins that need ffmpeg say so.
+func deployFfmpeg(s string) bool {
+	var src string
+	for _, c := range []string{filepath.Join(root, "runtime", "ffmpeg"), filepath.Join(root, "satellite", "build", "plugin-runtime", "ffmpeg-aarch64")} {
+		if fi, err := os.Stat(c); err == nil && fi.Size() > 0 {
+			src = c
+			break
+		}
+	}
+	if src == "" {
+		fmt.Fprintln(out, "ffmpeg for the programs of plugins missing (runtime/ffmpeg), not copied")
+		return true
+	}
+	want := sha256File(src)
+	have, _ := sh(s, "[ -f "+dataDir+"/ffmpeg ] && sha256sum "+dataDir+"/ffmpeg")
+	if firstField(have) == want {
+		return true
+	}
+	fmt.Fprintf(out, "== %s: ffmpeg for the programs of plugins\n", s)
+	if push(s, src, dataDir+"/ffmpeg.new") != nil {
+		return false
+	}
+	got, _ := sh(s, "sha256sum "+dataDir+"/ffmpeg.new")
+	if firstField(got) != want {
+		_ = shTo(out, s, "rm -f "+dataDir+"/ffmpeg.new")
+		fmt.Fprintf(errw, "%s: push corrupted (sha256 mismatch), ffmpeg not replaced\n", s)
+		return false
+	}
+	// a new inode: the programs that run keep the old one, the next start of each takes the new one (a hard link per plugin, see host.cpp)
+	return shTo(out, s, "cd "+dataDir+" && chmod 755 ffmpeg.new && mv ffmpeg.new ffmpeg && sync") == nil
 }
 
 // bootHooks adds the hook lines to rootkeeper.sh (planRootkeeper), keeping a backup.

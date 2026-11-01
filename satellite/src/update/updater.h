@@ -48,7 +48,7 @@ class Updater {
   void install(const Release &r, const std::string &binary, std::function<void(float)> progress,
                std::function<void(const std::string &err, bool fatal)> done);
 
-  static const char *arch();  // asset suffix of this build: aarch64 / armhf
+  static const char *arch();  // asset suffix of this build: aarch64 / armhf / android
   // Other release assets installed with the binary, e.g. the radio's firmware images: `name` from
   // the same release, checked against SHA256SUMS, written to `path`. Releases without one are
   // installed without it.

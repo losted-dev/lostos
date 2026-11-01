@@ -226,7 +226,7 @@ struct Request {
 struct DlnaRenderer::Impl {
   Loop &loop;
   DlnaRenderer &owner;
-  std::string name, uuid;
+  std::string name, uuid, model;
   uint16_t port = 0;
   std::string ip;
   int ssdp_fd = -1, http_fd = -1;
@@ -657,7 +657,7 @@ struct DlnaRenderer::Impl {
     return "<?xml version=\"1.0\"?>\n<root xmlns=\"urn:schemas-upnp-org:device-1-0\" xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">"
            "<specVersion><major>1</major><minor>0</minor></specVersion><device><dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>"
            "<deviceType>" + std::string(kDevType) + "</deviceType><friendlyName>" + xesc(name) +
-           "</friendlyName><manufacturer>Yandex</manufacturer><modelName>Station Mini 3</modelName>"
+           "</friendlyName><manufacturer>Yandex</manufacturer><modelName>" + xesc(model) + "</modelName>"
            "<modelDescription>Smart speaker with lostos</modelDescription><modelNumber>1</modelNumber><UDN>uuid:" + uuid + "</UDN>"
            "<serviceList>" + svc(kAvt, "AVTransport", "/avt.xml", "/ctl/avt", "/evt/avt") + svc(kRcs, "RenderingControl", "/rcs.xml", "/ctl/rcs", "/evt/rcs") +
            svc(kCm, "ConnectionManager", "/cm.xml", "/ctl/cm", "/evt/cm") + "</serviceList></device></root>";
@@ -881,9 +881,10 @@ DlnaRenderer::~DlnaRenderer() {
   delete impl_;
 }
 
-bool DlnaRenderer::start(const std::string &friendly_name, const std::string &uuid, uint16_t port) {
+bool DlnaRenderer::start(const std::string &friendly_name, const std::string &uuid, uint16_t port, const std::string &model_name) {
   auto &d = *impl_;
   d.name = friendly_name;
+  d.model = model_name;
   d.uuid = uuid;
   d.port = port;
   if (!d.http_open()) return false;

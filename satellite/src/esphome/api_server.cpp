@@ -152,6 +152,8 @@ enum Key : uint32_t {
   K_SW_ALICE_BUTTON = 50,
   K_TEXT_SYSINFO = 51,
   K_TEXT_DISPLAY = 52,
+  K_SW_CLOCK_AUTODIM = 53,
+  K_TEXT_VOICEPRINT = 54,
 };
 
 // aioesphomeapi VoiceAssistantFeature bits.
@@ -389,11 +391,11 @@ struct ApiServer::Impl {
   MediaState media_state = MediaState::IDLE;
   float media_volume = 0;
   bool media_muted = false;
-  BoolState sw_mic_mute, sw_clock, sw_auto_update, sw_nearest_answers, sw_voice_indication, sw_volume_sound, sw_lyrics, sw_cover_lookup, sw_alice_button, bs_hw_mute;
+  BoolState sw_mic_mute, sw_clock, sw_auto_update, sw_nearest_answers, sw_voice_indication, sw_volume_sound, sw_lyrics, sw_cover_lookup, sw_alice_button, sw_clock_autodim, bs_hw_mute;
   UpdateState update;
   bool update_has = false;
   FloatState lux, clock_bri, clock_scroll, led_speed;
-  StrState clock_text, clock_face, zigbee_mode, zigbee_status, music_viz, case_color, clock_eq, clock_eq_style, airplay_now, spotify_now, wifi, bluetooth, now_playing, spotify_cover, playback, music_json, eq_state, plugins_state, sysinfo_state, display_state;
+  StrState clock_text, clock_face, zigbee_mode, zigbee_status, music_viz, case_color, clock_eq, clock_eq_style, airplay_now, spotify_now, wifi, bluetooth, now_playing, spotify_cover, playback, music_json, eq_state, plugins_state, sysinfo_state, display_state, voiceprint_state;
   LightState light;
   // Diagnostics, refreshed by diag_timer.
   FloatState rssi;
@@ -1408,6 +1410,13 @@ struct ApiServer::Impl {
     }
     {
       pb::Writer w;
+      entity_head(w, "clock_auto_brightness", K_SW_CLOCK_AUTODIM, "Clock dims by the light sensor");
+      w.str(5, "mdi:brightness-auto");
+      w.u32(8, ENTITY_CATEGORY_CONFIG);
+      send_msg(c, LIST_SWITCH, w);
+    }
+    {
+      pb::Writer w;
       entity_head(w, "led_speed", K_NUMBER_LED_SPEED, "LED speed");
       w.str(5, "mdi:speedometer");
       w.flt(6, kLedSpeedMin);
@@ -1530,6 +1539,7 @@ struct ApiServer::Impl {
     text("plugins_state", K_TEXT_PLUGINS, "Speaker plugins", "mdi:puzzle-outline", true);
     text("system_stats", K_TEXT_SYSINFO, "System stats", "mdi:chip", true);
     text("display_frame", K_TEXT_DISPLAY, "Display frame", "mdi:numeric", true);   // what the clock display shows right now, for the live mirror in the panel
+    text("voiceprint", K_TEXT_VOICEPRINT, "Voiceprint", "mdi:account-voice", true);   // the vector of the last utterance (Controller::voiceprint_flush)
     text("wifi_status", K_TEXT_WIFI, "Wi-Fi status", "mdi:wifi");
     text("bluetooth_status", K_TEXT_BT, "Bluetooth status", "mdi:bluetooth-audio");
     text("now_playing", K_TEXT_NOW, "Now playing", "mdi:music-note");
@@ -1662,6 +1672,7 @@ struct ApiServer::Impl {
     send_switch(K_SW_LYRICS, sw_lyrics, c);
     send_switch(K_SW_COVER_LOOKUP, sw_cover_lookup, c);
     send_switch(K_SW_ALICE_BUTTON, sw_alice_button, c);
+    send_switch(K_SW_CLOCK_AUTODIM, sw_clock_autodim, c);
     send_update(c);
     send_binary(K_BS_HW_MIC_MUTE, bs_hw_mute, c);
     send_float(SENSOR_STATE, K_SENSOR_LUX, lux, c);
@@ -1692,6 +1703,7 @@ struct ApiServer::Impl {
     send_str(TEXT_SENSOR_STATE, K_TEXT_PLUGINS, plugins_state.v, plugins_state.has, c);
     send_str(TEXT_SENSOR_STATE, K_TEXT_SYSINFO, sysinfo_state.v, sysinfo_state.has, c);
     send_str(TEXT_SENSOR_STATE, K_TEXT_DISPLAY, display_state.v, display_state.has, c);
+    send_str(TEXT_SENSOR_STATE, K_TEXT_VOICEPRINT, voiceprint_state.v, voiceprint_state.has, c);
     if (!cfg.zigbee_modes.empty()) {
       send_str(SELECT_STATE, K_SELECT_ZIGBEE_MODE, zigbee_mode.v, zigbee_mode.has, c);
       send_str(TEXT_SENSOR_STATE, K_TEXT_ZIGBEE, zigbee_status.v, zigbee_status.has, c);
@@ -1793,6 +1805,8 @@ struct ApiServer::Impl {
       hooks.on_switch(SwitchId::COVER_LOOKUP, state);
     else if (key == K_SW_ALICE_BUTTON)
       hooks.on_switch(SwitchId::ALICE_BUTTON, state);
+    else if (key == K_SW_CLOCK_AUTODIM)
+      hooks.on_switch(SwitchId::CLOCK_AUTODIM, state);
   }
 
   void on_number_cmd(pb::Reader &r) {
@@ -1910,10 +1924,10 @@ struct ApiServer::Impl {
       return;
     }
     if (key == K_ACTION_ASSISTANT) {
-      if (!((args[0].s.rfind("alarm_set ", 0) == 0 || args[0].s.rfind("alarm_del ", 0) == 0 || args[0].s.rfind("reminder_set ", 0) == 0 || args[0].s.rfind("spotify_seek ", 0) == 0 || args[0].s.rfind("media ", 0) == 0 || args[0].s.rfind("eq ", 0) == 0 || args[0].s.rfind("plugin ", 0) == 0 || args[0].s.rfind("name ", 0) == 0 ||
+      if (!((args[0].s.rfind("alarm_set ", 0) == 0 || args[0].s.rfind("alarm_del ", 0) == 0 || args[0].s.rfind("reminder_set ", 0) == 0 || args[0].s.rfind("spotify_seek ", 0) == 0 || args[0].s.rfind("media ", 0) == 0 || args[0].s.rfind("eq ", 0) == 0 || args[0].s.rfind("plugin ", 0) == 0 || args[0].s.rfind("stream ", 0) == 0 || args[0].s.rfind("stream_seek ", 0) == 0 || args[0].s.rfind("name ", 0) == 0 ||
              args[0].s == "alarm_clear" || args[0].s == "alarm_gc") &&
             args[0].s.size() < 1500) &&
-          args[0].s != "barge on" && args[0].s != "barge off" && args[0].s != "interrupt" && args[0].s != "alarm on" && args[0].s != "hello" && args[0].s != "bluetooth on" && args[0].s != "bluetooth off" &&
+          args[0].s != "listen" && args[0].s != "barge on" && args[0].s != "barge off" && args[0].s != "interrupt" && args[0].s != "alarm on" && args[0].s != "hello" && args[0].s != "bluetooth on" && args[0].s != "bluetooth off" &&
           args[0].s != "alarm off" && args[0].s != "jingle home_on" && args[0].s != "jingle home_off" &&
           args[0].s != "jingle home_change") {
         LOGW("api: unknown assistant command");
@@ -2112,6 +2126,7 @@ void ApiServer::publish_switch(SwitchId id, bool state) {
     case SwitchId::LYRICS: s = &impl_->sw_lyrics; key = K_SW_LYRICS; break;
     case SwitchId::COVER_LOOKUP: s = &impl_->sw_cover_lookup; key = K_SW_COVER_LOOKUP; break;
     case SwitchId::ALICE_BUTTON: s = &impl_->sw_alice_button; key = K_SW_ALICE_BUTTON; break;
+    case SwitchId::CLOCK_AUTODIM: s = &impl_->sw_clock_autodim; key = K_SW_CLOCK_AUTODIM; break;
   }
   if (!s) return;
   s->has = true;
@@ -2167,6 +2182,11 @@ void ApiServer::publish_select(SelectId id, const std::string &state) {
 }
 
 void ApiServer::publish_text_sensor(TextSensorId id, const std::string &state) {
+  if (id == TextSensorId::VOICEPRINT) {
+    impl_->voiceprint_state = {true, state};
+    if (impl_->states_on()) impl_->send_str(TEXT_SENSOR_STATE, K_TEXT_VOICEPRINT, state, true);
+    return;
+  }
   if (id == TextSensorId::DISPLAY) {
     impl_->display_state = {true, state};
     if (impl_->states_on()) impl_->send_str(TEXT_SENSOR_STATE, K_TEXT_DISPLAY, state, true);

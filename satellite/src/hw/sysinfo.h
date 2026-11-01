@@ -12,6 +12,8 @@ class SysInfo {
   // Who the speaker is, for the "About" page of the panel (the values are put into the line as they are, ';' becomes ',').
   struct Who {
     std::string name, model, codename, version;
+    int ring = 0, logo = 0;          // LEDs of the ring / the logo (0: none)
+    bool clock = false;              // a segment display
   };
   // The line for the text sensor. The load is counted from the previous call (the first call has nothing to compare with and says 0).
   std::string line(const Who &who);
