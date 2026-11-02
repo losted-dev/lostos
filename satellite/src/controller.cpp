@@ -190,7 +190,36 @@ Controller::~Controller() = default;
 
 std::string Controller::model_dir(const std::string &id) const { return kModels + id; }
 
+// The Wi-Fi script ships inside the binary (an update replaces only the binary): where the speaker has the script, it is made the same as ours.
+static void sync_wifi_script() {
+  static const char kWifi[] = "/data/lostos/wifi.sh";
+  static const std::string ours =
+#include "wifi_sh.inc"
+      ;
+  if (access(kWifi, F_OK) != 0) return;
+  std::string cur;
+  if (FILE *f = fopen(kWifi, "rb")) {
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) cur.append(buf, n);
+    fclose(f);
+  }
+  if (cur == ours) return;
+  const std::string tmp = std::string(kWifi) + ".new";
+  FILE *f = fopen(tmp.c_str(), "wb");
+  if (!f) return;
+  const bool ok = fwrite(ours.data(), 1, ours.size(), f) == ours.size();
+  fclose(f);
+  if (!ok || chmod(tmp.c_str(), 0755) != 0 || rename(tmp.c_str(), kWifi) != 0) {
+    unlink(tmp.c_str());
+    LOGW("wifi.sh: cannot update the script");
+    return;
+  }
+  LOGI("wifi.sh: updated to the one of this release");
+}
+
 bool Controller::start() {
+  sync_wifi_script();
   st_.load(state_path_);
   if (!st_.tz.empty()) {  // clock shows local time before HA connects
     setenv("TZ", st_.tz.c_str(), 1);

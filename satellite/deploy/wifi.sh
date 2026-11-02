@@ -20,14 +20,32 @@ gateway() { ip route 2>/dev/null | sed -n 's/^default via \([0-9.]*\).*/\1/p' | 
 online() {   # associated, an address, and the gateway answers
   [ "$($W status 2>/dev/null | sed -n 's/^wpa_state=//p')" = "COMPLETED" ] || return 1
   gw=$(gateway); [ -n "$gw" ] || return 1
-  ping -c 2 -W 2 "$gw" >/dev/null 2>&1
+  ping -c 2 -W 2 "$gw" >/dev/null 2>&1 || return 1
+  # a network is working only when the server of the speaker can be reached through it (a phone hotspot answers the gateway, but a server at home is out of reach)
+  url=$(sed -n 's/^server=//p' /data/lostos/link.conf 2>/dev/null | head -1)
+  [ -n "$url" ] || return 0
+  srv=$(echo "$url" | cut -d/ -f3)
+  p=443; echo "$url" | grep -q '^http:' && p=80
+  h=$(echo "$srv" | cut -d: -f1)
+  if echo "$srv" | grep -q ':'; then p=$(echo "$srv" | cut -d: -f2); fi
+  command -v telnet >/dev/null 2>&1 || return 0
+  tcp_ok "$h" "$p"
+}
+
+tcp_ok() {   # a TCP connection to the server opens within 6 s (the telnet of busybox says "Connected")
+  (echo | telnet "$1" "$2" 2>&1 | grep -q Connected) & tp=$!
+  n=0; while kill -0 $tp 2>/dev/null && [ $n -lt 6 ]; do sleep 1; n=$((n + 1)); done
+  if kill -0 $tp 2>/dev/null; then kill $tp 2>/dev/null; return 1; fi
+  wait $tp
 }
 
 status() {
   st=$($W status 2>/dev/null)
   ssid=$(echo "$st" | sed -n 's/^ssid=//p'); state=$(echo "$st" | sed -n 's/^wpa_state=//p')
   ip=$(ip -4 addr show wlan0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
-  printf 'cur\t%s\t%s\t%s\t%s\t%s\n' "$ssid" "$ip" "$state" "$(cat $D/pending 2>/dev/null)" "$(cat $D/last 2>/dev/null)"
+  # the last message is shown for ten minutes only: after that (and after a reboot) it is a stale leftover
+  last=""; [ -n "$(find $D/last -mmin -10 2>/dev/null)" ] && last=$(cat $D/last 2>/dev/null)
+  printf 'cur\t%s\t%s\t%s\t%s\t%s\n' "$ssid" "$ip" "$state" "$(cat $D/pending 2>/dev/null)" "$last"
   $W list_networks 2>/dev/null | tail -n +2 | awk -F'\t' '{ printf "net\t%s\t%s\t%s\n", $1, $2, $4 }'
   [ -f /tmp/wifi-scan ] && head -n 25 /tmp/wifi-scan
 }
@@ -42,9 +60,9 @@ bad() { say "error: $*"; exit 1; }
 
 add() {
   ssid="$1"; pass="$2"; mode="$3"
-  case "$ssid$pass" in *\"*|*\\*) bad "quotes and backslashes are not supported in the name or password" ;; esac
-  [ -n "$ssid" ] && [ ${#ssid} -le 32 ] || bad "the network name must be 1-32 characters"
-  if [ -n "$pass" ]; then [ ${#pass} -ge 8 ] && [ ${#pass} -le 63 ] || bad "the password must be 8-63 characters"; fi
+  case "$pass" in *\"*|*\\*) bad "quotes and backslashes are not supported in the password" ;; esac
+  [ -n "$ssid" ] && [ "$(printf %s "$ssid" | wc -c)" -le 32 ] || bad "the network name must be 1-32 characters"
+  if [ -n "$pass" ]; then [ "$(printf %s "$pass" | wc -c)" -ge 8 ] && [ "$(printf %s "$pass" | wc -c)" -le 63 ] || bad "the password must be 8-63 characters"; fi
   if [ -f $D/pending ]; then
     # a leftover of an interrupted test (older than two minutes) does not block
     if [ -n "$(find $D/pending -mmin -2 2>/dev/null)" ]; then bad "a switch is already being tested, wait a minute"; fi
@@ -58,7 +76,8 @@ add() {
   $W list_networks | tail -n +2 | awk -F'\t' '$4 !~ /DISABLED/ { print $1 }' > $D/enabled-before
   id=$($W add_network | tail -1)
   case "$id" in ''|*[!0-9]*) bad "wpa_supplicant did not accept a new network" ;; esac
-  $W set_network $id ssid "\"$ssid\"" >/dev/null
+  ssid_hex=$(printf '%s' "$ssid" | od -An -tx1 | tr -d ' \n')
+  $W set_network $id ssid $ssid_hex >/dev/null   # the name goes as hex (not in quotes): any characters, Cyrillic too
   if [ -n "$pass" ]; then
     # what the router offers (the flags of its beacon): WPA2 only, WPA2+WPA3 mixed, or WPA3 only
     flags=$($W scan_results 2>/dev/null | awk -F'\t' -v s="$ssid" '$5 == s { print $4 }' | head -1)

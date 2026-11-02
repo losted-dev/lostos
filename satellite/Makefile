@@ -119,6 +119,14 @@ $(VERSION_STAMP): FORCE
 	@mkdir -p $(BUILD)
 	@echo '$(VERSION)' | cmp -s - $@ || echo '$(VERSION)' > $@
 
+# deploy/wifi.sh is part of the binary too (the daemon puts it next to itself at start): an update by the updater replaces the binary only
+WIFI_INC := $(BUILD)/wifi_sh.inc
+$(WIFI_INC): deploy/wifi.sh
+	@mkdir -p $(BUILD)
+	@(printf 'R"LOSTOSWIFI('; cat $<; printf ')LOSTOSWIFI"') > $@
+$(BUILD)/controller.o: $(WIFI_INC)
+$(BUILD)/controller.o: CXXFLAGS += -I$(BUILD)
+
 binary: $(BUILD)/lostos
 
 $(BUILD)/lostos.debug: $(OBJS) $(MONO_OBJS) $(SS_STAMP)
