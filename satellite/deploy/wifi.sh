@@ -59,8 +59,23 @@ add() {
   id=$($W add_network | tail -1)
   case "$id" in ''|*[!0-9]*) bad "wpa_supplicant did not accept a new network" ;; esac
   $W set_network $id ssid "\"$ssid\"" >/dev/null
-  if [ -n "$pass" ]; then $W set_network $id psk "\"$pass\"" >/dev/null; $W set_network $id key_mgmt WPA-PSK >/dev/null
+  if [ -n "$pass" ]; then
+    # what the router offers (the flags of its beacon): WPA2 only, WPA2+WPA3 mixed, or WPA3 only
+    flags=$($W scan_results 2>/dev/null | awk -F'\t' -v s="$ssid" '$5 == s { print $4 }' | head -1)
+    ok() { [ "$($W "$@" 2>/dev/null | tail -1)" = "OK" ]; }
+    if echo "$flags" | grep -q 'SAE' && ! echo "$flags" | grep -q 'WPA2-PSK'; then
+      # WPA3 only; if this supplicant has no SAE, it falls back to the plain way below
+      ok set_network $id sae_password "\"$pass\"" && ok set_network $id key_mgmt SAE && ok set_network $id ieee80211w 2 || sae_failed=1
+    else sae_failed=1; fi
+    if [ -n "$sae_failed" ]; then
+      $W set_network $id psk "\"$pass\"" >/dev/null
+      # WPA2 and WPA2/WPA3 mixed: the PMF ones too (some routers demand protected frames), then the plain one for old supplicants
+      ok set_network $id key_mgmt "WPA-PSK WPA-PSK-SHA256" || $W set_network $id key_mgmt WPA-PSK >/dev/null
+      $W set_network $id ieee80211w 1 >/dev/null 2>&1      # protected frames optional; an old supplicant ignores it
+      $W set_network $id proto "WPA RSN" >/dev/null 2>&1; $W set_network $id pairwise "CCMP TKIP" >/dev/null 2>&1; $W set_network $id group "CCMP TKIP" >/dev/null 2>&1
+    fi
   else $W set_network $id key_mgmt NONE >/dev/null; fi
+  $W set_network $id scan_ssid 1 >/dev/null 2>&1                # also finds a hidden network and one that is quiet in the scan
   $W enable_network $id >/dev/null
   if [ "$mode" != "now" ]; then
     $W save_config >/dev/null
@@ -73,27 +88,43 @@ add() {
 }
 
 # The watchdog of "add ... now": a process of its own (setsid), so that it outlives whoever started it.
-restore_enabled() {   # exactly the networks that were enabled before (the user may keep some disabled on purpose)
-  while read i; do $W enable_network "$i" >/dev/null; done < $D/enabled-before
+restore_enabled() {   # every stored network is enabled again (nobody disables one on purpose, and a leftover of an interrupted test must not stay off)
+  $W list_networks | tail -n +2 | awk -F'\t' '{ print $1 }' | while read i; do $W enable_network "$i" >/dev/null; done
+  tidy
+}
+
+tidy() {   # copies of the network in use (several entries with the same name) are removed, one is enough
+  cur=$($W status | sed -n 's/^ssid=//p'); [ -n "$cur" ] || return 0
+  $W list_networks | tail -n +2 | awk -F'\t' -v s="$cur" '$2 == s && $4 !~ /CURRENT/ { print $1 }' | while read old; do $W remove_network "$old" >/dev/null; done
+  $W save_config >/dev/null
 }
 
 watch() {
   id="$1"; prev="$2"; ssid="$3"
   $W select_network $id >/dev/null
-  n=0
+  n=0; joined=0; seen=""
   while [ $n -lt 9 ]; do
     sleep 5; n=$((n + 1))
-    if [ "$($W status | sed -n 's/^ssid=//p')" = "$ssid" ] && online; then
-      restore_enabled
-      $W save_config >/dev/null
-      echo "ok: now on '$ssid'" > $D/last; rm -f $D/pending; exit 0
+    st=$($W status 2>/dev/null)
+    seen=$(echo "$st" | sed -n 's/^wpa_state=//p')
+    if [ "$(echo "$st" | sed -n 's/^ssid=//p')" = "$ssid" ] && [ "$seen" = "COMPLETED" ]; then
+      joined=1
+      if online; then
+        restore_enabled
+        $W save_config >/dev/null
+        echo "ok: now on '$ssid'" > $D/last; rm -f $D/pending; exit 0
+      fi
     fi
   done
+  # why it did not work: joined but no gateway / never found / the handshake did not finish (usually a wrong password)
+  if [ $joined = 1 ]; then why=nogw
+  elif [ "$seen" = "SCANNING" ] || [ "$seen" = "INACTIVE" ]; then why=notfound
+  else why=auth; fi
   $W remove_network $id >/dev/null
   if [ -n "$prev" ]; then $W select_network "$prev" >/dev/null; fi
   restore_enabled
   $W reconnect >/dev/null
-  echo "failed: '$ssid' did not work, went back to the previous network" > $D/last; rm -f $D/pending
+  echo "failed: '$ssid' did not work [$why], went back to the previous network" > $D/last; rm -f $D/pending
 }
 
 forget() {
