@@ -13,6 +13,9 @@ struct Model {
   std::string host_prefix;    // ESPHome node name prefix, the MAC suffix is appended
   std::string friendly_name;  // shown in Home Assistant / Music Assistant
   std::string model_name;
+  // The model that AirPlay announces: the iPhone and the Mac draw the icon of that device in their lists ("AudioAccessory5,1" is the HomePod mini, which the receiver program says by itself;
+  // "AudioAccessory6,1" is the big HomePod, for the big speakers). Exactly the form AudioAccessoryN,N: the program is patched in place, so the length must stay. "" = leave the program's own.
+  std::string airplay_model;
 
   // Capture: interleaved S16 frames from capture_pcm; VQE gets mic_channels / spk_channels.
   // capture_pcm is an ALSA name, or "tinyalsa:<card>,<device>" for the system libtinyalsa.so of the

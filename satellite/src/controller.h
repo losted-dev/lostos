@@ -189,7 +189,7 @@ class Controller : public ApiHooks {
                           const std::string &artist = "", bool from_server = false, uint32_t dur_ms = 0, uint32_t offset_ms = 0);
   std::string last_air_track_;   // the previous AirPlay track text: a different one means the track changed by itself
   void track_change(int dir);  // display: bars sweep, then the equalizer
-  int64_t last_music_ms_ = 0;     // last music state change / button use: the centre button stays a play/pause key for a minute
+  int64_t last_music_ms_ = -10000000;   // (long ago: 0 made the button a play/pause key for the first minute after start) last music state change / button use: the centre button stays a play/pause key for a minute
   int64_t mic_flip_block_until_ms_ = 0;
   int64_t mic_toggle_ms_ = 0;     // previous hardware mic switch flip (two quick flips toggle AirPlay)
   uint64_t tap_timer_ = 0;        // a single tap on the centre button waits briefly for a second one

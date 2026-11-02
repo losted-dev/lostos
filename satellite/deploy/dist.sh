@@ -28,7 +28,7 @@ for a in aarch64 armhf; do
 done
 put radio/out/zigbee-router.ybl 644
 put radio/out/zigbee-coordinator.ybl 644
-for f in boot.sh supervise.sh ctl.sh; do put satellite/deploy/$f 755; done
+for f in boot.sh supervise.sh ctl.sh wifi.sh; do put satellite/deploy/$f 755; done
 put ssh/start.sh 755
 put README.md 644
 put LICENSE 644

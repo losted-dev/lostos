@@ -27,6 +27,12 @@ func doctor(st station) []finding {
 		add(false, true, "lostos is not installed on the station (no %s/lostos)", dataDir)
 		return out
 	}
+	hits, _ := detectMods(s)
+	for _, h := range hits {
+		if len(h.running) > 0 && !h.info {
+			add(false, false, "a mod of someone else is running and gets in the way: %s (%s); stop it, or run the installer with --stop-mods", h.title, h.why)
+		}
+	}
 	sum, _ := run("sha256sum " + dataDir + "/lostos")
 	add(true, false, "daemon: %s/lostos, SHA-256 %s", dataDir, truncate(firstField(sum), 12))
 	if _, ok := run("pidof lostos"); ok {

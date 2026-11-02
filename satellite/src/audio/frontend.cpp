@@ -74,18 +74,16 @@ class AlsaCapture : public CaptureSource {
     if ((err = snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) return fail("set_access", err);
     if ((err = snd_pcm_hw_params_set_format(pcm, hw, s32 ? SND_PCM_FORMAT_S32_LE : SND_PCM_FORMAT_S16_LE)) < 0) return fail("set_format", err);
     if ((err = snd_pcm_hw_params_set_channels(pcm, hw, nch)) < 0) return fail("set_channels", err);
-    unsigned rate = want_rate;
-    if ((err = snd_pcm_hw_params_set_rate_near(pcm, hw, &rate, nullptr)) < 0) return fail("set_rate_near", err);
-    if (rate != want_rate) {
-      LOGE("capture %s: rate %u Hz, need %u", dev, rate, want_rate);
-      return fail("rate", 0);
-    }
-    snd_pcm_uframes_t per = period, buf = period * 8;
-    if ((err = snd_pcm_hw_params_set_period_size_near(pcm, hw, &per, nullptr)) < 0) return fail("set_period_size_near", err);
-    if ((err = snd_pcm_hw_params_set_buffer_size_near(pcm, hw, &buf)) < 0) return fail("set_buffer_size_near", err);
+    // The exact setters only: the firmware's libasound keeps the old versions of the *_near and get_rate symbols (the link is unversioned),
+    // which take the value instead of a pointer. A _near call then asked the driver for a rate that was the address of a variable, the
+    // driver fell back to its maximum (192 kHz on the Midi) and the spotters heard audio six times too slow, while this code believed 96 kHz.
+    const unsigned rate = want_rate;
+    if ((err = snd_pcm_hw_params_set_rate(pcm, hw, rate, 0)) < 0) return fail("set_rate", err);
+    snd_pcm_uframes_t per = period, buf = 0;
+    if (snd_pcm_hw_params_set_period_size(pcm, hw, per, 0) < 0) per = 0;   // not a size of this device: its own one is used, read back below
     if ((err = snd_pcm_hw_params(pcm, hw)) < 0) return fail("snd_pcm_hw_params", err);
-    LOGI("capture %s: %u Hz, %u ch %s, period %lu, buffer %lu", dev, rate, nch, s32 ? "S32" : "S16", (unsigned long)per,
-         (unsigned long)buf);
+    if ((err = snd_pcm_get_params(pcm, &buf, &per)) < 0) return fail("get_params", err);
+    LOGI("capture %s: %u Hz, %u ch %s, period %lu, buffer %lu", dev, rate, nch, s32 ? "S32" : "S16", (unsigned long)per, (unsigned long)buf);
     auto c = std::make_unique<AlsaCapture>();
     c->pcm_ = pcm;
     c->hw_period_ = std::min<snd_pcm_uframes_t>(per, period);

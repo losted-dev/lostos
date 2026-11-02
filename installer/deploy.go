@@ -81,6 +81,9 @@ func installOne(st station) bool {
 	if !checkSpace(s, bin, receiversKB(st.arch, chosen)) {
 		return false
 	}
+	if !checkMods(s) {
+		return false
+	}
 	if opts.dryRun {
 		return dryRun(s, bin, st, chosen)
 	}
@@ -154,13 +157,13 @@ func deployFiles(s, bin, ts, arch string, zigbee, legacy bool) (changed, supChan
 	if firstField(supHave) == scriptSHA(filepath.Join(deploy, "supervise.sh")) {
 		supChanged = false
 	}
-	for _, f := range []string{"boot.sh", "supervise.sh", "ctl.sh"} {
+	for _, f := range []string{"boot.sh", "supervise.sh", "ctl.sh", "wifi.sh"} {
 		if pushScript(s, filepath.Join(deploy, f), dataDir+"/"+f+".new") != nil {
 			return
 		}
 	}
-	if shTo(out, s, "cd "+dataDir+" && chmod 755 boot.sh.new supervise.sh.new ctl.sh.new &&\n"+
-		"     mv boot.sh.new boot.sh && mv supervise.sh.new supervise.sh && mv ctl.sh.new ctl.sh") != nil {
+	if shTo(out, s, "cd "+dataDir+" && chmod 755 boot.sh.new supervise.sh.new ctl.sh.new wifi.sh.new &&\n"+
+		"     mv boot.sh.new boot.sh && mv supervise.sh.new supervise.sh && mv ctl.sh.new ctl.sh && mv wifi.sh.new wifi.sh") != nil {
 		return
 	}
 	if changed {
@@ -484,10 +487,7 @@ func stationCode(s string) string {
 	if err != nil {
 		return ""
 	}
-	if m := codename.FindStringSubmatch(compat); m != nil {
-		return m[1]
-	}
-	return ""
+	return pickCode(compat)
 }
 
 // deployProfile puts the model profile of the station (satellite/models/<code>.conf) on it when the daemon has no built-in one
@@ -518,7 +518,7 @@ func dryRun(s, bin string, st station, receivers []string) bool {
 	fmt.Fprintf(out, "== %s: dry run, nothing is changed\n", s)
 	fmt.Fprintf(out, "  model:    %s (%s)\n", modelName(st.code), st.code)
 	fmt.Fprintf(out, "  daemon:   %s (%d KB) -> %s/lostos, the old one kept as lostos.prev\n", bin, fileKB(bin), dataDir)
-	fmt.Fprintf(out, "  scripts:  boot.sh supervise.sh ctl.sh -> %s\n", dataDir)
+	fmt.Fprintf(out, "  scripts:  boot.sh supervise.sh ctl.sh wifi.sh -> %s\n", dataDir)
 	if !builtinModel(st.code) {
 		fmt.Fprintf(out, "  profile:  satellite/models/%s.conf -> %s/models/\n", st.code, dataDir)
 	}

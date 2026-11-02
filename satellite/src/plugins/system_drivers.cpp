@@ -130,6 +130,7 @@ std::string speaker_name(const Model &model) {
   if (c == "plum") return "Я.Станция Лайт 2";
   if (c == "cucumber") return "Я.Станция Миди";
   if (c == "station-micro") return "Я.Станция Лайт";
+  if (c == "station-midi") return "Я.Станция 2";
   if (c == "station-mini2") return "Я.Станция Мини 2";
   return "Я.Станция";
 }
@@ -281,6 +282,25 @@ void add_audio_core(SystemPlugins &mods, std::vector<SysPlugin> &out) {
 
 // ---- AirPlay 2: nqptp (the clock), avahi (the announcement), shairport-sync (the receiver)
 
+// The icon of the speaker in the AirPlay list of an iPhone or a Mac comes from the model that the receiver announces. The program says "AudioAccessory5,1" (the HomePod mini) in three places (the
+// announcement, the second announcement and the /info answer); a big speaker names the big HomePod in its profile (airplay_model). The name has the same length, so the program is copied with the
+// name replaced and the copy is started; the program of the package stays as it is. Returns the program to start.
+std::string shairport_for(const std::string &dir, const Model &model) {
+  const std::string orig = dir + "/shairport-sync-ap2";
+  static const std::string kStock = "AudioAccessory5,1";
+  if (model.airplay_model.empty() || model.airplay_model == kStock || model.airplay_model.size() != kStock.size()) return orig;
+  std::string bin = slurp(orig);
+  size_t n = 0;
+  for (size_t at = bin.find(kStock); at != std::string::npos; at = bin.find(kStock, at + kStock.size())) {
+    bin.replace(at, kStock.size(), model.airplay_model);
+    n++;
+  }
+  if (n == 0) return orig;
+  const std::string patched = dir + "/shairport-sync-ap2.model";
+  if (slurp(patched) != bin && !put_file(patched, bin, 0755)) return orig;
+  return patched;
+}
+
 void add_airplay_plugin(SystemPlugins &mods, std::vector<SysPlugin> &out) {
   SysPlugin m;
   m.id = "ru.lostos.airplay";
@@ -303,7 +323,7 @@ void add_airplay_plugin(SystemPlugins &mods, std::vector<SysPlugin> &out) {
       << "metadata = { enabled = \"yes\"; include_cover_art = \"yes\"; pipe_name = \"/tmp/shairport-sync-ap2-metadata\"; };\n";
     return put_file(dir + "/shairport.conf", c.str());
   };
-  m.plan = [dir] {
+  m.plan = [&mods, dir] {
     const std::vector<std::pair<std::string, std::string>> env = {{"LD_LIBRARY_PATH", dir + "/libs"}, {"HOME", dir}};
     SysProc nq;
     nq.name = "nqptp";
@@ -316,7 +336,7 @@ void add_airplay_plugin(SystemPlugins &mods, std::vector<SysPlugin> &out) {
     av.env = env;
     SysProc sp;
     sp.name = "shairport-sync";
-    sp.exe = dir + "/shairport-sync-ap2";
+    sp.exe = shairport_for(dir, mods.model());
     sp.args = {"-c", dir + "/shairport.conf"};
     sp.env = env;
     sp.delay_ms = 2000;

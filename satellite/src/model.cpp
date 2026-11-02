@@ -26,6 +26,7 @@ Model midi() {
   m.host_prefix = "yandex-midi-";
   m.friendly_name = "Яндекс Станция Миди";
   m.model_name = "Yandex Station Midi";
+  m.airplay_model = "AudioAccessory6,1";  // a big speaker shows the big HomePod in the AirPlay list
   m.capture_pcm = "hw:0,2";
   m.capture_rate = 96000;
   m.capture_channels = 8;
@@ -173,6 +174,11 @@ std::string strip_to(const Model::LedStrip &st) {
 
 }  // namespace
 
+// AudioAccessoryN,N: the form of the model names of the HomePods; the same length as the one in the receiver program (17 characters), which is patched in place.
+static bool valid_airplay_model(const std::string &v) {
+  return v.size() == 17 && v.compare(0, 14, "AudioAccessory") == 0 && v[14] >= '0' && v[14] <= '9' && v[15] == ',' && v[16] >= '0' && v[16] <= '9';
+}
+
 std::string dump_profile(const Model &m) {
   std::ostringstream o;
   std::vector<std::string> mics, spks, vm;
@@ -180,7 +186,7 @@ std::string dump_profile(const Model &m) {
   for (unsigned n : m.spk_channels) spks.push_back(std::to_string(n));
   for (const auto &p : m.volume_map) vm.push_back(std::to_string(p.level) + ":" + std::to_string(p.raw));
   o << "# lostOS model profile: one key=value per line, '#' starts a comment (see docs/models.md)\n"
-    << "codename=" << m.codename << "\nhost_prefix=" << m.host_prefix << "\nfriendly_name=" << m.friendly_name << "\nmodel_name=" << m.model_name << "\n"
+    << "codename=" << m.codename << "\nhost_prefix=" << m.host_prefix << "\nfriendly_name=" << m.friendly_name << "\nmodel_name=" << m.model_name << "\n" << (m.airplay_model.empty() ? "" : "airplay_model=" + m.airplay_model + "\n")
     << "capture_pcm=" << m.capture_pcm << "\ncapture_rate=" << m.capture_rate << "\ncapture_channels=" << m.capture_channels << "\n"
     << (m.capture_format.empty() ? "" : "capture_format=" + m.capture_format + "\n")
     << (m.ref_pcm.empty() ? "" : "ref_pcm=" + m.ref_pcm + "\nref_rate=" + std::to_string(m.ref_rate) + "\nref_channels=" + std::to_string(m.ref_channels) + "\n")
@@ -224,6 +230,9 @@ bool parse_profile(const std::string &text, Model &m, std::string *error) {
       m.friendly_name = v;
     } else if (k == "model_name") {
       m.model_name = v;
+    } else if (k == "airplay_model") {
+      if (!v.empty() && !valid_airplay_model(v)) return fail("airplay_model must look like AudioAccessory6,1");
+      m.airplay_model = v;
     } else if (k == "capture_pcm") {
       m.capture_pcm = v;
     } else if (k == "capture_rate") {

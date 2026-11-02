@@ -57,10 +57,13 @@ installer; --offline uses only what the package has (no downloads at all).
 The daemon comes from GitHub Releases: the newest stable release of the lostOS repository (--repo owner/name for a fork) is used when it differs from the package, after its SHA256SUMS
 match; --version v0.3.1 pins one release (an error if it can not be had), --offline keeps the package. A build of your own: use --offline.
 --scan may reach other Android devices on the network, which can show an adb authorization prompt.
+Mods of other people on the station (a Spotify Connect of their own, a night light on the LED panel, a program that holds the microphones, Luna) are looked for before anything is copied, named with the reason why
+they get in the way, and the lines that start them at boot are shown. --stop-mods stops the running ones until the next reboot; the installer never edits or deletes a mod.
 `
 
 type options struct {
 	ssh, noEnable, yes, list, scan, dryRun, uninstall, purge bool
+	stopMods                                                 bool // --stop-mods: stop the mods of other people that get in the way, until the next reboot (nothing of theirs is edited)
 	gui, cli, noBrowser                                      bool
 	localServer                                              bool     // --local-server <speaker ip>: install and start the small server on this computer, and link the speaker to it
 	receivers                                                []string // --receivers airplay,spotify: the system plugins to put on the station (ids)
@@ -108,6 +111,8 @@ func parseArgs(args []string) (options, error) {
 		switch {
 		case a == "--gui":
 			o.gui = true
+		case a == "--stop-mods":
+			o.stopMods = true
 		case a == "--offline":
 			o.offline = true
 		case a == "--doctor":

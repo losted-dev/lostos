@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // Devicetree codename -> name / userland ABI (build/<arch>/): all of it is in the catalog of models (catalog.go), which the package and the signed catalog of the lostOS
@@ -62,6 +63,31 @@ var probed []probeResult
 
 var codename = regexp.MustCompile(`yandex,([a-z0-9_-]*)`)
 
+// pickCode chooses the model from the "compatible" list of the devicetree. A speaker lists several names, the exact one of its board first and the family after it
+// ("yandex,bergamot-evt1 yandex,bergamot", an engineering sample of the Mini 3): the first name that the catalog knows wins, then a name whose part before the last dash is known
+// (a board "bergamot-evt2" that nobody listed yet is a bergamot), then the first name as it is (a new model: the catalog can still learn it). "" when there is no name at all.
+func pickCode(compat string) string {
+	all := codename.FindAllStringSubmatch(compat, -1)
+	first := ""
+	for _, m := range all {
+		if m[1] == "" {
+			continue
+		}
+		if first == "" {
+			first = m[1]
+		}
+		if catalog[m[1]].Name != "" {
+			return m[1]
+		}
+	}
+	for _, m := range all {
+		if i := strings.LastIndex(m[1], "-"); i > 0 && catalog[m[1][:i]].Name != "" {
+			return m[1][:i]
+		}
+	}
+	return first
+}
+
 // probe prints one status line for s and records it in found if it is installable. A device we
 // connected to ourselves is disconnected again when it is not.
 func probe(s string, ours bool) {
@@ -88,12 +114,11 @@ func probe(s string, ours bool) {
 		}
 		return
 	}
-	m := codename.FindStringSubmatch(compat)
-	if m == nil || m[1] == "" {
+	code := pickCode(compat)
+	if code == "" {
 		skip("not a Yandex Station")
 		return
 	}
-	code := m[1]
 	rec.Code = code
 	name := modelName(code)
 	if name == "" {
